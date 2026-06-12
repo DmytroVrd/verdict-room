@@ -5,6 +5,9 @@ due diligence. A user submits a purchase case in a Band room; specialized
 agents gather evidence, compare alternatives, debate risks, recruit a
 compliance specialist when needed, and publish a scored verdict.
 
+The live prototype has completed a full six-agent Band-room run, including
+dynamic Compliance recruitment, timeout recovery, and a persisted scorecard.
+
 ## Why Band
 
 Band is the coordination layer, not a notification wrapper. Every handoff,

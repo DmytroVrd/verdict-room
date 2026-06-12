@@ -16,4 +16,18 @@ Verified on 2026-06-12 with `band-sdk==1.0.0`.
 - Participant management:
   `GET|POST /api/v1/agent/chats/{chat_id}/participants`.
 
-Live behavior still needs verification after real credentials are configured.
+## Live verification
+
+Verified on 2026-06-12 with six remote agents:
+
+- `scripts/smoke_band.py`: 6/6 identities authenticated.
+- Six agents run concurrently in one asyncio process without WebSocket conflicts.
+- `@Arbiter ping` returned a PONG in about one second.
+- A full Band-room debate reached a saved JSON verdict.
+- Dynamic Compliance recruitment succeeded through participant tools.
+- Structured verdict events were accepted.
+- Mention filtering is strict in practice: downstream handoffs must carry a
+  compact case/evidence digest because agents cannot rely on room-wide history.
+- Timeout logs confirmed the configured 120-second reminder and second
+  120-second auto-advance windows. Band UI ordering can make reminders appear
+  visually adjacent to a later handoff.
