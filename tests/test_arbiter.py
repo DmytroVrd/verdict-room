@@ -109,6 +109,14 @@ async def test_full_debate_with_dynamic_compliance() -> None:
     assert any("HANDOFF: @Compliance" in item[0] for item in tools.messages)
     assert any("FINAL VERDICT" in item[0] for item in tools.messages)
     assert any("```json" in item[0] for item in tools.messages)
+    critic_handoff = next(
+        content for content, _ in tools.messages if "ROUND 1: CHALLENGE" in content
+    )
+    assert "CASE BRIEF:" in critic_handoff
+    assert "EVIDENCE DIGEST:" in critic_handoff
+    assert "Facts with sources" in critic_handoff
+    assert "Alternatives compared" in critic_handoff
+    assert all(len(content.split()) <= 200 for content, _ in tools.messages)
     assert any(item["metadata"]["kind"] == "verdict" for item in tools.events)
     assert adapter.states["room-1"].phase == DebatePhase.IDLE
 
@@ -207,3 +215,68 @@ async def test_timeout_reminds_once_then_continues() -> None:
     assert adapter.states["room-timeout"].phase == DebatePhase.SCOUTING
     assert adapter.states["room-timeout"].missing_agents == ["Researcher"]
     adapter._cancel_timeout("room-timeout")
+
+
+@pytest.mark.asyncio
+async def test_reply_cancels_previous_phase_timeout() -> None:
+    adapter = ArbiterAdapter(
+        FakeListChatModel(responses=["unused"]),
+        turn_timeout=0.03,
+    )
+    tools = FakeTools()
+    history = HistoryProvider(raw=[])
+    await adapter.on_message(
+        message("Dmytro", "@Arbiter analyze Notion"),
+        tools,
+        history,
+        None,
+        None,
+        is_session_bootstrap=False,
+        room_id="room-cancel",
+    )
+    await asyncio.sleep(0.01)
+    await adapter.on_message(
+        message("Researcher", "Facts ready. @Arbiter"),
+        tools,
+        history,
+        None,
+        None,
+        is_session_bootstrap=False,
+        room_id="room-cancel",
+    )
+    await asyncio.sleep(0.025)
+    assert not any("TIMEOUT REMINDER" in content for content, _ in tools.messages)
+    assert adapter.states["room-cancel"].phase == DebatePhase.SCOUTING
+    adapter._cancel_timeout("room-cancel")
+
+
+def test_clean_case_replaces_raw_platform_mention() -> None:
+    msg = message(
+        "Dmytro",
+        "@[[12345678-1234-1234-1234-123456789abc]] Analyze Notion for 50 users",
+    )
+    assert ArbiterAdapter._clean_case(msg) == ("@Dmytro Analyze Notion for 50 users")
+
+
+def test_snapshot_strips_old_handoff_and_keeps_sources() -> None:
+    source = (
+        "FACTS: Notion has tiered plans.\n"
+        "SOURCES: https://www.notion.com/pricing https://example.com/review\n"
+        "HANDOFF: @Arbiter | STATE: RESEARCH_COMPLETE | REQUEST: continue"
+    )
+    snapshot = ArbiterAdapter._snapshot(source, max_urls=2)
+    assert "HANDOFF:" not in snapshot
+    assert "https://www.notion.com/pricing" in snapshot
+    assert "https://example.com/review" in snapshot
+
+
+def test_cap_message_keeps_single_handoff_under_200_words() -> None:
+    content = (
+        "ROUND\n"
+        + " ".join(["evidence"] * 300)
+        + "\nHANDOFF: @Critic | STATE: ROUND_1 | REQUEST: objections"
+    )
+    capped = ArbiterAdapter._cap_message(content)
+    assert len(capped.split()) <= 195
+    assert capped.count("HANDOFF:") == 1
+    assert capped.endswith("HANDOFF: @Critic | STATE: ROUND_1 | REQUEST: objections")

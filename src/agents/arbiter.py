@@ -42,6 +42,14 @@ class DebateState:
     compliance_reviewed: bool = False
     missing_agents: list[str] = field(default_factory=list)
     transcript: list[str] = field(default_factory=list)
+    research_evidence: str = ""
+    scout_evidence: str = ""
+    critic_round_1: str = ""
+    compliance_evidence: str = ""
+    advocate_round_1: str = ""
+    critic_round_2: str = ""
+    pending_message: str = ""
+    pending_mentions: list[str] = field(default_factory=list)
 
 
 class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
@@ -107,25 +115,29 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
             ):
                 state.initiator = msg.sender_name or msg.sender_id
                 state.phase = DebatePhase.CHAIN_RESEARCHER
-                await tools.send_message(
+                await self._delegate(
+                    state,
+                    tools,
                     "⚖️ CONNECTION TEST\n"
                     "@Researcher reply with one short greeting, then return control to @Arbiter.\n"
                     "HANDOFF: @Researcher | STATE: CHAIN_TEST | REQUEST: greeting",
-                    mentions=["@Researcher"],
+                    ["@Researcher"],
                 )
                 self._schedule_timeout(room_id, tools)
                 return
-            state.case = msg.content
+            state.case = self._clean_case(msg)
             state.initiator = msg.sender_name or msg.sender_id
             state.phase = DebatePhase.RESEARCH
-            await tools.send_message(
+            await self._delegate(
+                state,
+                tools,
                 "⚖️ CASE OPENED\n"
-                f"- Request: {self._trim(msg.content, 600)}\n"
+                f"CASE BRIEF: {self._brief(state.case, 55)}\n"
                 "- Process: research → alternatives → two debate rounds → verdict\n"
                 "@Researcher gather pricing, capabilities, company facts, and user complaints. "
                 "Cite real URLs and return control to @Arbiter.\n"
                 "HANDOFF: @Researcher | STATE: RESEARCH | REQUEST: sourced fact list",
-                mentions=["@Researcher"],
+                ["@Researcher"],
             )
         elif state.phase == DebatePhase.CHAIN_RESEARCHER:
             initiator = (
@@ -139,64 +151,85 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
             )
             self.states[room_id] = DebateState()
         elif state.phase == DebatePhase.RESEARCH:
+            state.research_evidence = self._snapshot(msg.content, max_urls=2)
             state.phase = DebatePhase.SCOUTING
-            await tools.send_message(
+            await self._delegate(
+                state,
+                tools,
                 "⚖️ EVIDENCE RECEIVED\n"
-                f"@Scout compare 2-3 credible alternatives for this case: {self._trim(state.case, 300)}. "
-                "Use price, fit, and key trade-offs. Return control to @Arbiter.\n"
+                f"{self._context_block(state, include=('research',), max_words=125)}\n"
+                "@Scout compare 2-3 credible alternatives using price, fit, and trade-offs. "
+                "Return control to @Arbiter.\n"
                 "HANDOFF: @Scout | STATE: SCOUTING | REQUEST: alternative comparison",
-                mentions=["@Scout"],
+                ["@Scout"],
             )
         elif state.phase == DebatePhase.SCOUTING:
+            state.scout_evidence = self._snapshot(msg.content, max_urls=1)
             state.phase = DebatePhase.ROUND_1_CRITIC
-            await tools.send_message(
+            await self._delegate(
+                state,
+                tools,
                 "⚖️ ROUND 1: CHALLENGE\n"
+                f"{self._context_block(state, include=('research', 'scout'), max_words=115)}\n"
                 "@Critic present the strongest case AGAINST the purchase using only room evidence. "
                 "Call out hidden cost, lock-in, migration, security, and privacy. "
                 "Use the exact marker COMPLIANCE CONCERN when specialist review is needed. "
                 "Return control to @Arbiter.\n"
                 "HANDOFF: @Critic | STATE: ROUND_1 | REQUEST: strongest objections",
-                mentions=["@Critic"],
+                ["@Critic"],
             )
         elif state.phase == DebatePhase.ROUND_1_CRITIC:
+            state.critic_round_1 = self._snapshot(msg.content)
             if "COMPLIANCE CONCERN" in msg.content.upper():
                 state.compliance_requested = True
                 if await self._recruit_compliance(tools):
                     state.phase = DebatePhase.COMPLIANCE
-                    await tools.send_message(
+                    await self._delegate(
+                        state,
+                        tools,
                         "⚖️ SPECIALIST REVIEW\n"
-                        f"@Compliance assess data residency, GDPR/privacy, certifications, and contractual risk "
-                        f"for this case: {self._trim(state.case, 250)}. Return control to @Arbiter.\n"
+                        f"{self._context_block(state, include=('research', 'scout', 'critic1'), max_words=115)}\n"
+                        "@Compliance assess data residency, GDPR/privacy, certifications, and contractual risk. "
+                        "Return control to @Arbiter.\n"
                         "HANDOFF: @Compliance | STATE: RECRUIT | REQUEST: compliance opinion",
-                        mentions=["@Compliance"],
+                        ["@Compliance"],
                     )
                 else:
                     state.phase = DebatePhase.ROUND_1_ADVOCATE
-                    await self._ask_advocate(tools)
+                    await self._ask_advocate(tools, state)
             else:
                 state.phase = DebatePhase.ROUND_1_ADVOCATE
-                await self._ask_advocate(tools)
+                await self._ask_advocate(tools, state)
         elif state.phase == DebatePhase.COMPLIANCE:
             state.compliance_reviewed = True
+            state.compliance_evidence = self._snapshot(msg.content)
             state.phase = DebatePhase.ROUND_1_ADVOCATE
-            await self._ask_advocate(tools)
+            await self._ask_advocate(tools, state)
         elif state.phase == DebatePhase.ROUND_1_ADVOCATE:
+            state.advocate_round_1 = self._snapshot(msg.content)
             state.phase = DebatePhase.ROUND_2_CRITIC
-            await tools.send_message(
+            await self._delegate(
+                state,
+                tools,
                 "⚖️ ROUND 2: REBUTTAL\n"
+                f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance', 'advocate1'), max_words=110)}\n"
                 "@Critic strengthen only the objections that remain unresolved. Do not repeat closed points. "
                 "Return control to @Arbiter.\n"
                 "HANDOFF: @Critic | STATE: ROUND_2 | REQUEST: unresolved objections",
-                mentions=["@Critic"],
+                ["@Critic"],
             )
         elif state.phase == DebatePhase.ROUND_2_CRITIC:
+            state.critic_round_2 = self._snapshot(msg.content)
             state.phase = DebatePhase.ROUND_2_ADVOCATE
-            await tools.send_message(
+            await self._delegate(
+                state,
+                tools,
                 "⚖️ ROUND 2: CLOSING\n"
+                f"{self._context_block(state, include=('research', 'scout', 'critic2', 'compliance'), max_words=110)}\n"
                 "@Advocate give a concise closing statement. Address the remaining objections point by point "
                 "and state any purchase conditions. Return control to @Arbiter.\n"
                 "HANDOFF: @Advocate | STATE: ROUND_2 | REQUEST: final defense",
-                mentions=["@Advocate"],
+                ["@Advocate"],
             )
         elif state.phase == DebatePhase.ROUND_2_ADVOCATE:
             await self._finalize_verdict(room_id, state, msg, history, tools)
@@ -204,13 +237,18 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
         logger.info("%s -> %s", previous, self.states[room_id].phase)
         self._schedule_timeout(room_id, tools)
 
-    async def _ask_advocate(self, tools: AgentToolsProtocol) -> None:
-        await tools.send_message(
+    async def _ask_advocate(
+        self, tools: AgentToolsProtocol, state: DebateState
+    ) -> None:
+        await self._delegate(
+            state,
+            tools,
             "⚖️ ROUND 1: DEFENSE\n"
+            f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance'), max_words=115)}\n"
             "@Advocate answer the Critic point by point using room evidence only. "
             "Concede unsupported claims and propose concrete safeguards. Return control to @Arbiter.\n"
             "HANDOFF: @Advocate | STATE: ROUND_1 | REQUEST: point-by-point defense",
-            mentions=["@Advocate"],
+            ["@Advocate"],
         )
 
     async def _recruit_compliance(self, tools: AgentToolsProtocol) -> bool:
@@ -371,6 +409,92 @@ Transcript:
         return value if len(value) <= limit else value[: limit - 1] + "…"
 
     @staticmethod
+    def _brief(value: str, max_words: int) -> str:
+        words = " ".join(value.split()).split()
+        if len(words) <= max_words:
+            return " ".join(words)
+        return " ".join(words[:max_words]) + "…"
+
+    @classmethod
+    def _snapshot(cls, value: str, max_urls: int = 0) -> str:
+        lines = [
+            line.strip()
+            for line in value.splitlines()
+            if line.strip() and not line.strip().startswith("HANDOFF:")
+        ]
+        cleaned = " ".join(lines)
+        cleaned = re.sub(r"^[⚖️🔍✅❌🕵️🛡️]\s*", "", cleaned)
+        urls = list(dict.fromkeys(re.findall(r"https?://[^\s)\]>]+", cleaned)))
+        prose = re.sub(r"https?://[^\s)\]>]+", "", cleaned)
+        snapshot = cls._brief(prose, 120)
+        if max_urls and urls:
+            snapshot = f"{snapshot} SOURCES: {' '.join(urls[:max_urls])}"
+        return " ".join(snapshot.split())
+
+    @classmethod
+    def _cap_message(cls, content: str, max_words: int = 195) -> str:
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        handoff = next(
+            (line for line in reversed(lines) if line.startswith("HANDOFF:")), ""
+        )
+        body_lines = [line for line in lines if not line.startswith("HANDOFF:")]
+        reserved = len(handoff.split()) if handoff else 0
+        body = cls._brief(" ".join(body_lines), max(1, max_words - reserved))
+        return f"{body}\n{handoff}".strip() if handoff else body
+
+    async def _delegate(
+        self,
+        state: DebateState,
+        tools: AgentToolsProtocol,
+        content: str,
+        mentions: list[str],
+    ) -> None:
+        message = self._cap_message(content)
+        state.pending_message = message
+        state.pending_mentions = list(mentions)
+        await tools.send_message(message, mentions=mentions)
+
+    @classmethod
+    def _clean_case(cls, msg: PlatformMessage) -> str:
+        content = re.sub(
+            r"@\[\[[0-9a-fA-F-]{16,}\]\]",
+            cls._mention_for(msg),
+            msg.content,
+        )
+        return " ".join(content.split())
+
+    @classmethod
+    def _context_block(
+        cls,
+        state: DebateState,
+        *,
+        include: tuple[str, ...],
+        max_words: int,
+    ) -> str:
+        labels = {
+            "research": ("FACTS", state.research_evidence),
+            "scout": ("ALTERNATIVES", state.scout_evidence),
+            "critic1": ("CRITIC R1", state.critic_round_1),
+            "compliance": ("COMPLIANCE", state.compliance_evidence),
+            "advocate1": ("ADVOCATE R1", state.advocate_round_1),
+            "critic2": ("CRITIC R2", state.critic_round_2),
+        }
+        parts = [f"CASE BRIEF: {cls._brief(state.case, 38)}"]
+        available = [
+            (label, value) for key in include for label, value in [labels[key]] if value
+        ]
+        if available:
+            remaining = max(20, max_words - len(parts[0].split()) - len(available) * 2)
+            each = max(15, remaining // len(available))
+            digest = " | ".join(
+                f"{label}: {cls._brief(value, each)}" for label, value in available
+            )
+            parts.append(f"EVIDENCE DIGEST: {digest}")
+        for role in state.missing_agents:
+            parts.append(f"GAP: {role} unavailable")
+        return "\n".join(parts)
+
+    @staticmethod
     def _is_expected_sender(phase: DebatePhase, msg: PlatformMessage) -> bool:
         expected = {
             DebatePhase.CHAIN_RESEARCHER: "researcher",
@@ -440,8 +564,17 @@ Transcript:
         if not self.turn_timeout or self.states[room_id].phase == DebatePhase.IDLE:
             return
         self._cancel_timeout(room_id)
+        phase = self.states[room_id].phase
+        scheduled_at = asyncio.get_running_loop().time()
+        logger.info(
+            "Timeout scheduled room=%s phase=%s delay=%.1fs deadline=%.3f",
+            room_id,
+            phase,
+            self.turn_timeout,
+            scheduled_at + self.turn_timeout,
+        )
         self.timeout_tasks[room_id] = asyncio.create_task(
-            self._watch_turn(room_id, self.states[room_id].phase, tools)
+            self._watch_turn(room_id, phase, tools, scheduled_at)
         )
 
     async def _watch_turn(
@@ -449,17 +582,26 @@ Transcript:
         room_id: str,
         phase: DebatePhase,
         tools: AgentToolsProtocol,
+        scheduled_at: float | None = None,
     ) -> None:
         try:
+            started_at = scheduled_at or asyncio.get_running_loop().time()
             await asyncio.sleep(self.turn_timeout or 0)
             if self.states[room_id].phase != phase:
                 return
-            expected = self._expected_handle(phase)
-            await tools.send_message(
-                f"⚖️ TIMEOUT REMINDER\n{expected} please complete the pending turn. "
-                "This is the only retry.",
-                mentions=[expected],
+            elapsed = asyncio.get_running_loop().time() - started_at
+            logger.info(
+                "Timeout reminder firing room=%s phase=%s elapsed=%.3fs",
+                room_id,
+                phase,
+                elapsed,
             )
+            expected = self._expected_handle(phase)
+            reminder = self._cap_message(
+                "⚖️ TIMEOUT REMINDER — this is the only retry.\n"
+                f"{self.states[room_id].pending_message}"
+            )
+            await tools.send_message(reminder, mentions=[expected])
             await asyncio.sleep(self.turn_timeout or 0)
             if self.states[room_id].phase != phase:
                 return
@@ -490,38 +632,50 @@ Transcript:
             return
         if phase == DebatePhase.RESEARCH:
             state.phase = DebatePhase.SCOUTING
-            await tools.send_message(
+            await self._delegate(
+                state,
+                tools,
                 "⚖️ RESEARCH TIMED OUT\n"
+                f"{self._context_block(state, include=(), max_words=100)}\n"
                 "@Scout compare 2-3 alternatives using available room evidence.\n"
                 "HANDOFF: @Scout | STATE: SCOUTING | REQUEST: alternative comparison",
-                mentions=["@Scout"],
+                ["@Scout"],
             )
         elif phase == DebatePhase.SCOUTING:
             state.phase = DebatePhase.ROUND_1_CRITIC
-            await tools.send_message(
+            await self._delegate(
+                state,
+                tools,
                 "⚖️ SCOUTING TIMED OUT\n"
+                f"{self._context_block(state, include=('research',), max_words=110)}\n"
                 "@Critic present the strongest evidence-based objections.\n"
                 "HANDOFF: @Critic | STATE: ROUND_1 | REQUEST: strongest objections",
-                mentions=["@Critic"],
+                ["@Critic"],
             )
         elif phase in {DebatePhase.ROUND_1_CRITIC, DebatePhase.COMPLIANCE}:
             state.phase = DebatePhase.ROUND_1_ADVOCATE
-            await self._ask_advocate(tools)
+            await self._ask_advocate(tools, state)
         elif phase == DebatePhase.ROUND_1_ADVOCATE:
             state.phase = DebatePhase.ROUND_2_CRITIC
-            await tools.send_message(
+            await self._delegate(
+                state,
+                tools,
                 "⚖️ DEFENSE TIMED OUT\n"
+                f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance'), max_words=110)}\n"
                 "@Critic identify only unresolved objections for the closing round.\n"
                 "HANDOFF: @Critic | STATE: ROUND_2 | REQUEST: unresolved objections",
-                mentions=["@Critic"],
+                ["@Critic"],
             )
         elif phase == DebatePhase.ROUND_2_CRITIC:
             state.phase = DebatePhase.ROUND_2_ADVOCATE
-            await tools.send_message(
+            await self._delegate(
+                state,
+                tools,
                 "⚖️ REBUTTAL TIMED OUT\n"
+                f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance'), max_words=110)}\n"
                 "@Advocate give the final defense and purchase conditions.\n"
                 "HANDOFF: @Advocate | STATE: ROUND_2 | REQUEST: final defense",
-                mentions=["@Advocate"],
+                ["@Advocate"],
             )
         elif phase == DebatePhase.ROUND_2_ADVOCATE:
             msg = self.last_messages[room_id]
