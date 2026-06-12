@@ -1,0 +1,23 @@
+{
+  "case": "Should a 50-person company adopt Notion as its primary workspace?",
+  "scores": {
+    "value_for_money": 18,
+    "capability_fit": 22,
+    "risk_profile": 15,
+    "alternatives": 17
+  },
+  "total": 72,
+  "recommendation": "BUY_WITH_CONDITIONS",
+  "rationale": [
+    "Strong all-in-one fit for documentation, lightweight projects, and team knowledge.",
+    "The rollout is faster than a heavily administered enterprise suite.",
+    "Governance, export testing, and AI data controls require explicit ownership."
+  ],
+  "conditions": [
+    "Run a 30-day pilot with two representative teams.",
+    "Test workspace export and recovery before migration.",
+    "Approve data residency and AI processing terms with legal."
+  ],
+  "dissent": "Confluence remains the stronger choice when mature permissions, auditability, and Jira-native governance outweigh usability.",
+  "compliance_reviewed": true
+}
