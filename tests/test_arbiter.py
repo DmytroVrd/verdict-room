@@ -148,6 +148,27 @@ async def test_unexpected_sender_does_not_advance() -> None:
 
 
 @pytest.mark.asyncio
+async def test_idle_worker_handoff_is_ignored() -> None:
+    adapter = ArbiterAdapter(FakeListChatModel(responses=["unused"]))
+    tools = FakeTools()
+    await adapter.on_message(
+        message(
+            "Scout",
+            "🕵️ Alternatives ready.\n"
+            "HANDOFF: @Arbiter | STATE: SCOUTING_COMPLETE | REQUEST: continue",
+        ),
+        tools,
+        HistoryProvider(raw=[]),
+        None,
+        None,
+        is_session_bootstrap=False,
+        room_id="room-idle-worker",
+    )
+    assert adapter.states["room-idle-worker"].phase == DebatePhase.IDLE
+    assert tools.messages == []
+
+
+@pytest.mark.asyncio
 async def test_ping_does_not_open_case() -> None:
     adapter = ArbiterAdapter(FakeListChatModel(responses=["unused"]))
     tools = FakeTools()

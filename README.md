@@ -7,6 +7,10 @@ compliance specialist when needed, and publish a scored verdict.
 
 The live prototype has completed a full six-agent Band-room run, including
 dynamic Compliance recruitment, timeout recovery, and a persisted scorecard.
+After hardening delivery, the clean verification run completed end to end in
+about three minutes with no reminders, no missing agents, and no runtime errors.
+
+![Verdict Room report](docs/e2e-report.png)
 
 ## Why Band
 

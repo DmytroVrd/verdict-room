@@ -43,9 +43,10 @@ def render_report(verdict: dict[str, Any]) -> str:
     .verdict {{ color: #75e6a4; }}
     .score-grid {{ display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr));
       gap: 12px; }}
-    article {{ display: flex; justify-content: space-between; background: #0c111a;
-      border-radius: 14px; padding: 18px; }}
-    article span {{ color: #75e6a4; font-weight: 800; }}
+    article {{ display: flex; justify-content: space-between; align-items: baseline;
+      gap: 16px; background: #0c111a; border-radius: 14px; padding: 18px; }}
+    article strong {{ line-height: 1.3; }}
+    article span {{ color: #75e6a4; font-weight: 800; white-space: nowrap; }}
     li {{ margin: 10px 0; line-height: 1.5; }}
     footer {{ color: #8da2c8; text-align: center; padding: 24px; }}
   </style>

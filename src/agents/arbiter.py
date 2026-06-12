@@ -496,6 +496,8 @@ Transcript:
 
     @staticmethod
     def _is_expected_sender(phase: DebatePhase, msg: PlatformMessage) -> bool:
+        if phase == DebatePhase.IDLE and "HANDOFF:" in msg.content.upper():
+            return False
         expected = {
             DebatePhase.CHAIN_RESEARCHER: "researcher",
             DebatePhase.RESEARCH: "researcher",

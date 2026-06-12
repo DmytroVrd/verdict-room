@@ -31,3 +31,13 @@ Verified on 2026-06-12 with six remote agents:
 - Timeout logs confirmed the configured 120-second reminder and second
   120-second auto-advance windows. Band UI ordering can make reminders appear
   visually adjacent to a later handoff.
+- A clean post-fix run on 2026-06-13 completed in about three minutes:
+  Researcher replied in 31 seconds, Scout in 18 seconds, no timeout reminders
+  fired, Compliance was recruited dynamically, and the verdict had no evidence
+  gaps.
+- Tool-capable LangGraph workers can finish successfully without calling
+  `band_send_message`. Verdict Room now requires that tool in the prompt and
+  deterministically sends the final model text when the call is omitted.
+- Band REST serializes real mentions as `@[[uuid]]`; case sanitization removes
+  incoming transport tokens from the copied brief, while the platform may still
+  show this representation when messages are fetched through the API.
