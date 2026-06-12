@@ -17,19 +17,21 @@ explicit `@Researcher`, `@Scout`, `@Critic`, `@Advocate`, `@Compliance`, and
 
 | Agent | Job | Default provider |
 | --- | --- | --- |
-| Arbiter | Deterministic debate state machine and verdict | Groq |
-| Researcher | Sourced pricing, features, and complaints | Groq |
-| Scout | Alternatives and trade-offs | OpenRouter free router |
-| Critic | Risks, hidden costs, privacy trigger | AI/ML API |
-| Advocate | Evidence-based defense and closing | Gemini |
-| Compliance | Dynamically recruited specialist | Gemini |
+| Arbiter | Deterministic debate state machine and verdict | AI/ML API |
+| Researcher | Sourced pricing, features, and complaints | AI/ML API |
+| Scout | Alternatives and trade-offs | AI/ML API |
+| Critic | Risks, hidden costs, privacy trigger | Featherless |
+| Advocate | Evidence-based defense and closing | Featherless |
+| Compliance | Dynamically recruited specialist | Featherless |
 
-Model IDs live in `.env` because free catalogs change. Configured providers
-form a runtime fallback chain.
+AI/ML API handles the tool-heavy roles. Featherless Premium handles the
+debate roles through a deterministic adapter that posts model output to Band,
+so those models do not need native function calling. Optional Groq, Gemini,
+and OpenRouter keys extend the fallback chain.
 
 ## Quickstart
 
-Requirements: Python 3.11+, `uv`, a Band account, at least one free LLM key,
+Requirements: Python 3.11+, `uv`, Band Pro, AI/ML API and Featherless keys,
 and six remote agents created in Band.
 
 ```powershell

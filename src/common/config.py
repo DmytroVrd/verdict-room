@@ -10,17 +10,17 @@ from dotenv import load_dotenv
 ROLES = ("arbiter", "researcher", "scout", "advocate", "critic", "compliance")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MODELS = {
-    "arbiter": "groq:openai/gpt-oss-120b",
-    "researcher": "groq:openai/gpt-oss-120b",
-    "scout": "openrouter:openrouter/free",
-    "advocate": "gemini:gemini-3.5-flash",
-    "critic": "aiml:openai/gpt-4.1-mini",
-    "compliance": "gemini:gemini-3.5-flash",
+    "arbiter": "aiml:openai/gpt-4.1-mini",
+    "researcher": "aiml:openai/gpt-4.1-mini",
+    "scout": "aiml:openai/gpt-4.1-mini",
+    "advocate": "featherless:deepseek-ai/DeepSeek-V3.2",
+    "critic": "featherless:deepseek-ai/DeepSeek-V3.1-Terminus",
+    "compliance": "featherless:deepseek-ai/DeepSeek-V3.2",
 }
 DEFAULT_FALLBACK_MODELS = (
+    "aiml:openai/gpt-4.1-mini",
+    "featherless:deepseek-ai/DeepSeek-V3.2",
     "groq:openai/gpt-oss-120b",
-    "gemini:gemini-3.5-flash",
-    "openrouter:openrouter/free",
 )
 
 
@@ -103,4 +103,5 @@ def configured_provider_keys() -> dict[str, bool]:
         "gemini": bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")),
         "openrouter": bool(os.getenv("OPENROUTER_API_KEY")),
         "aiml": bool(os.getenv("AIML_API_KEY")),
+        "featherless": bool(os.getenv("FEATHERLESS_API_KEY")),
     }

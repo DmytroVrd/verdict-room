@@ -129,6 +129,12 @@ def _build_model(spec: ModelSpec, settings: Settings) -> BaseChatModel:
             base_url="https://api.aimlapi.com/v1",
             **common,
         )
+    if spec.provider == "featherless":
+        return ChatOpenAI(
+            api_key=os.environ["FEATHERLESS_API_KEY"],
+            base_url="https://api.featherless.ai/v1",
+            **common,
+        )
     raise LLMConfigurationError(f"Unsupported provider '{spec.provider}'")
 
 
@@ -145,6 +151,8 @@ def available_model_specs(
             continue
         seen.add(value)
         spec = ModelSpec.parse(value)
+        if role in {"researcher", "scout"} and spec.provider == "featherless":
+            continue
         if configured.get(spec.provider, False):
             result.append(spec)
     return result
