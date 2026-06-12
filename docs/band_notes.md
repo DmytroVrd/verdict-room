@@ -35,6 +35,9 @@ Verified on 2026-06-12 with six remote agents:
   Researcher replied in 31 seconds, Scout in 18 seconds, no timeout reminders
   fired, Compliance was recruited dynamically, and the verdict had no evidence
   gaps.
+- An immediate repeat run also completed cleanly: Researcher replied in 42
+  seconds, Scout in 14 seconds, no reminders or runtime errors fired, and the
+  verdict again had no evidence gaps.
 - Tool-capable LangGraph workers can finish successfully without calling
   `band_send_message`. Verdict Room now requires that tool in the prompt and
   deterministically sends the final model text when the call is omitted.
