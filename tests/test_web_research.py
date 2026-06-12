@@ -67,6 +67,100 @@ def test_web_search_gracefully_handles_failure(
     assert web_research.web_search("query") == []
 
 
+def test_ddgs_text_uses_bounded_backends_without_retrying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, float]] = []
+
+    class FakeDDGS:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        def __enter__(self) -> FakeDDGS:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def text(
+            self, query: str, *, max_results: int, backend: str
+        ) -> list[dict[str, str]]:
+            calls.append((backend, self.timeout))
+            assert query == "Notion pricing"
+            assert max_results == 3
+            if backend == "brave":
+                raise RuntimeError("brave unavailable")
+            return [{"title": "Plans", "href": "https://example.com"}]
+
+    monkeypatch.setattr(web_research, "DDGS", FakeDDGS)
+
+    assert web_research._ddgs_text("Notion pricing", 3, timeout=20) == [
+        {"title": "Plans", "href": "https://example.com"}
+    ]
+    assert [backend for backend, _ in calls] == ["brave", "mojeek"]
+    assert sum(timeout for _, timeout in calls) <= web_research.MAX_SEARCH_TIMEOUT
+
+
+def test_ddgs_text_supports_older_api_without_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str | None] = []
+
+    class LegacyDDGS:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout <= web_research.MAX_SEARCH_TIMEOUT
+
+        def __enter__(self) -> LegacyDDGS:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def text(
+            self,
+            query: str,
+            *,
+            max_results: int,
+            **kwargs: str,
+        ) -> list[dict[str, str]]:
+            backend = kwargs.get("backend")
+            calls.append(backend)
+            if backend is not None:
+                raise TypeError("unexpected keyword argument 'backend'")
+            return [{"title": query, "href": f"https://example.com/{max_results}"}]
+
+    monkeypatch.setattr(web_research, "DDGS", LegacyDDGS)
+
+    assert web_research._ddgs_text("legacy", 2, timeout=3) == [
+        {"title": "legacy", "href": "https://example.com/2"}
+    ]
+    assert calls == ["brave", None]
+
+
+def test_web_search_caps_results_for_agent_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_limits: list[int] = []
+
+    def fake_search(
+        query: str, max_results: int, timeout: float
+    ) -> list[dict[str, str]]:
+        requested_limits.append(max_results)
+        return [
+            {
+                "title": f"Result {index}",
+                "href": f"https://example.com/{index}",
+            }
+            for index in range(20)
+        ]
+
+    monkeypatch.setattr(web_research, "_ddgs_text", fake_search)
+
+    results = web_research.web_search("query", max_results=100)
+    assert requested_limits == [web_research.MAX_SEARCH_RESULTS]
+    assert len(results) == web_research.MAX_SEARCH_RESULTS
+
+
 def test_fetch_page_extracts_text_and_uses_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

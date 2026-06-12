@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -22,6 +23,9 @@ from tenacity import (
 CACHE_DIR = Path("data/cache")
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_MAX_RESULTS = 5
+MAX_SEARCH_RESULTS = 5
+MAX_SEARCH_TIMEOUT = 8.0
+SEARCH_BACKENDS = ("brave", "mojeek")
 MAX_PAGE_CHARS = 12_000
 USER_AGENT = "VerdictRoomResearch/0.1 (+https://github.com/verdict-room)"
 REDDIT_SEARCH_URL = "https://www.reddit.com/search.json"
@@ -106,15 +110,37 @@ def _as_float(value: Any) -> float:
         return 0.0
 
 
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=2, min=2, max=8),
-    retry=retry_if_exception_type(Exception),
-    reraise=True,
-)
 def _ddgs_text(query: str, max_results: int, timeout: float) -> list[dict[str, Any]]:
-    with DDGS(timeout=max(1, int(timeout))) as client:
-        return client.text(query, max_results=max_results)
+    timeout_budget = max(0.1, min(float(timeout), MAX_SEARCH_TIMEOUT))
+    deadline = time.monotonic() + timeout_budget
+    last_error: Exception | None = None
+
+    for backend in SEARCH_BACKENDS:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+
+        backend_budget = timeout_budget / len(SEARCH_BACKENDS)
+        backend_timeout = max(0.1, min(remaining, backend_budget))
+        try:
+            with DDGS(timeout=backend_timeout) as client:
+                try:
+                    return client.text(
+                        query,
+                        max_results=max_results,
+                        backend=backend,
+                    )
+                except TypeError as exc:
+                    if "backend" not in str(exc):
+                        raise
+                    # Older DDGS releases do not expose backend selection.
+                    return client.text(query, max_results=max_results)
+        except Exception as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise last_error
+    raise TimeoutError(f"web search exceeded {timeout_budget:.1f}s timeout")
 
 
 @retry(
@@ -153,21 +179,22 @@ def web_search(
     if not cleaned_query or max_results <= 0:
         return []
 
+    result_limit = min(max_results, MAX_SEARCH_RESULTS)
     parameters: dict[str, object] = {
         "query": cleaned_query,
-        "max_results": max_results,
+        "max_results": result_limit,
     }
     cached = _read_cache("web_search", parameters)
     if isinstance(cached, list):
         return cached
 
     try:
-        raw_results = _ddgs_text(cleaned_query, max_results, timeout)
+        raw_results = _ddgs_text(cleaned_query, result_limit, timeout)
     except Exception:
         return []
 
     results: list[SearchResult] = []
-    for item in raw_results[:max_results]:
+    for item in raw_results[:result_limit]:
         if not isinstance(item, dict):
             continue
         url = str(item.get("href") or item.get("url") or "").strip()
