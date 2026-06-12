@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -43,6 +44,9 @@ class FakeTools:
 
     async def add_participant(self, identifier: str, role: str = "member") -> None:
         self.added.append(identifier)
+
+    async def get_participants(self) -> list[str]:
+        return self.added
 
 
 def message(sender: str, content: str) -> PlatformMessage:
@@ -104,6 +108,7 @@ async def test_full_debate_with_dynamic_compliance() -> None:
     assert tools.added == ["Compliance"]
     assert any("HANDOFF: @Compliance" in item[0] for item in tools.messages)
     assert any("FINAL VERDICT" in item[0] for item in tools.messages)
+    assert any("```json" in item[0] for item in tools.messages)
     assert any(item["metadata"]["kind"] == "verdict" for item in tools.events)
     assert adapter.states["room-1"].phase == DebatePhase.IDLE
 
@@ -132,3 +137,73 @@ async def test_unexpected_sender_does_not_advance() -> None:
         room_id="room-2",
     )
     assert adapter.states["room-2"].phase == DebatePhase.RESEARCH
+
+
+@pytest.mark.asyncio
+async def test_ping_does_not_open_case() -> None:
+    adapter = ArbiterAdapter(FakeListChatModel(responses=["unused"]))
+    tools = FakeTools()
+    await adapter.on_message(
+        message("Dmytro", "@Arbiter ping"),
+        tools,
+        HistoryProvider(raw=[]),
+        None,
+        None,
+        is_session_bootstrap=False,
+        room_id="room-ping",
+    )
+    assert adapter.states["room-ping"].phase == DebatePhase.IDLE
+    assert tools.messages[-1][0].startswith("⚖️ PONG")
+
+
+@pytest.mark.asyncio
+async def test_mention_chain_returns_to_idle() -> None:
+    adapter = ArbiterAdapter(FakeListChatModel(responses=["unused"]))
+    tools = FakeTools()
+    history = HistoryProvider(raw=[])
+    await adapter.on_message(
+        message("Dmytro", "@Arbiter передай привіт Researcher"),
+        tools,
+        history,
+        None,
+        None,
+        is_session_bootstrap=False,
+        room_id="room-chain",
+    )
+    assert adapter.states["room-chain"].phase == DebatePhase.CHAIN_RESEARCHER
+    await adapter.on_message(
+        message("Researcher", "🔍 Hello. @Arbiter"),
+        tools,
+        history,
+        None,
+        None,
+        is_session_bootstrap=False,
+        room_id="room-chain",
+    )
+    assert adapter.states["room-chain"].phase == DebatePhase.IDLE
+    assert "CONNECTION TEST PASSED" in tools.messages[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_timeout_reminds_once_then_continues() -> None:
+    adapter = ArbiterAdapter(
+        FakeListChatModel(responses=["unused"]),
+        turn_timeout=0.02,
+    )
+    tools = FakeTools()
+    await adapter.on_message(
+        message("Dmytro", "@Arbiter analyze Notion"),
+        tools,
+        HistoryProvider(raw=[]),
+        None,
+        None,
+        is_session_bootstrap=False,
+        room_id="room-timeout",
+    )
+    await asyncio.sleep(0.025)
+    assert adapter.states["room-timeout"].phase == DebatePhase.RESEARCH
+    assert sum("TIMEOUT REMINDER" in item[0] for item in tools.messages) == 1
+    await asyncio.sleep(0.025)
+    assert adapter.states["room-timeout"].phase == DebatePhase.SCOUTING
+    assert adapter.states["room-timeout"].missing_agents == ["Researcher"]
+    adapter._cancel_timeout("room-timeout")

@@ -18,7 +18,18 @@ async def main() -> None:
     if missing:
         raise RuntimeError(f"Missing Band credentials for: {', '.join(missing)}")
 
-    agents = [build_arbiter_agent(credentials["arbiter"], settings)]
+    compliance_identifier = (
+        credentials["compliance"].agent_id
+        if settings.start_compliance and "compliance" in credentials
+        else "Compliance"
+    )
+    agents = [
+        build_arbiter_agent(
+            credentials["arbiter"],
+            settings,
+            compliance_identifier=compliance_identifier,
+        )
+    ]
     for role in ROLES[1:]:
         if role == "compliance" and not settings.start_compliance:
             continue

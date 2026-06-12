@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from band import Agent
+from band.core.protocols import AgentToolsProtocol
+from band.core.simple_adapter import SimpleAdapter
+from band.core.types import HistoryProvider, PlatformMessage
+from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import StructuredTool
 
-from src.agents.base import build_langgraph_agent
+from src.agents.base import build_langgraph_agent, load_prompt
 from src.common.config import AgentCredentials, Settings
+from src.common.llm import make_llm
 
 
 def _research_tools() -> list[Any]:
@@ -23,5 +29,60 @@ def build_worker_agent(
     credentials: AgentCredentials,
     settings: Settings,
 ):
-    tools = _research_tools() if role in {"researcher", "scout"} else []
-    return build_langgraph_agent(role, credentials, settings, tools=tools)
+    if role in {"researcher", "scout"}:
+        return build_langgraph_agent(
+            role, credentials, settings, tools=_research_tools()
+        )
+    return Agent.create(
+        adapter=TextWorkerAdapter(
+            role=role,
+            llm=make_llm(role, settings),
+            instructions=load_prompt(role),
+        ),
+        agent_id=credentials.agent_id,
+        api_key=credentials.api_key,
+        rest_url=settings.band_rest_url,
+        ws_url=settings.band_ws_url,
+    )
+
+
+class TextWorkerAdapter(SimpleAdapter[HistoryProvider]):
+    """Generate text with any chat model, then send it through Band explicitly."""
+
+    def __init__(self, role: str, llm: BaseChatModel, instructions: str) -> None:
+        super().__init__()
+        self.role = role
+        self.llm = llm
+        self.instructions = instructions
+
+    async def on_message(
+        self,
+        msg: PlatformMessage,
+        tools: AgentToolsProtocol,
+        history: HistoryProvider,
+        participants_msg: str | None,
+        contacts_msg: str | None,
+        *,
+        is_session_bootstrap: bool,
+        room_id: str,
+    ) -> None:
+        del participants_msg, contacts_msg, is_session_bootstrap, room_id
+        transcript = "\n".join(
+            f"[{item.get('sender_name') or item.get('sender_type', 'Unknown')}]: "
+            f"{item.get('content', '')}"
+            for item in history.raw[-20:]
+        )
+        prompt = (
+            f"{self.instructions}\n\n"
+            "Return only the final Band message, at most 200 words. "
+            "Do not wrap it in commentary.\n\n"
+            f"Room context:\n{transcript}\n"
+            f"Current request:\n[{msg.sender_name or msg.sender_type}]: {msg.content}"
+        )
+        response = await self.llm.ainvoke(prompt)
+        content = (
+            response.content
+            if isinstance(response.content, str)
+            else str(response.content)
+        ).strip()
+        await tools.send_message(content, mentions=["@Arbiter"])

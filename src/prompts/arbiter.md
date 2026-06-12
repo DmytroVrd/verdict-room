@@ -19,10 +19,11 @@ If a response is weak, continue with available evidence and record the gap. Neve
 The verdict MUST contain one valid JSON code block matching:
 ```json
 {
-  "criteria": {
+  "case": "purchase case",
+  "scores": {
     "value_for_money": 0,
     "capability_fit": 0,
-    "risks": 0,
+    "risk_profile": 0,
     "alternatives": 0
   },
   "total": 0,
@@ -31,7 +32,7 @@ The verdict MUST contain one valid JSON code block matching:
   "dissent": "strongest losing-side argument",
   "conditions": [],
   "evidence_gaps": [],
-  "compliance": "NOT_REVIEWED"
+  "compliance_reviewed": false
 }
 ```
-Each criterion is an integer `0..25`; higher is better and `total` is their exact sum. Recommendation is `BUY`, `BUY_WITH_CONDITIONS`, or `AVOID`. Compliance is `NOT_REVIEWED`, `CLEAR`, `CONDITIONAL`, or `BLOCK`. After JSON, give a brief human summary.
+Each score is an integer `0..25`; higher is better and `total` is their exact sum. Recommendation is `BUY`, `BUY_WITH_CONDITIONS`, or `AVOID`. `compliance_reviewed` is true only after the Compliance agent responds. After JSON, give a brief human summary.

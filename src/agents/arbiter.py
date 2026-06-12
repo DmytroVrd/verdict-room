@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ logger = logging.getLogger("ARBITER")
 
 class DebatePhase(StrEnum):
     IDLE = "IDLE"
+    CHAIN_RESEARCHER = "CHAIN_RESEARCHER"
     RESEARCH = "RESEARCH"
     SCOUTING = "SCOUTING"
     ROUND_1_CRITIC = "ROUND_1_CRITIC"
@@ -37,13 +39,26 @@ class DebateState:
     case: str = ""
     initiator: str = ""
     compliance_requested: bool = False
+    compliance_reviewed: bool = False
+    missing_agents: list[str] = field(default_factory=list)
+    transcript: list[str] = field(default_factory=list)
 
 
 class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
-    def __init__(self, llm: BaseChatModel) -> None:
+    def __init__(
+        self,
+        llm: BaseChatModel,
+        turn_timeout: float | None = None,
+        compliance_identifier: str = "Compliance",
+    ) -> None:
         super().__init__()
         self.llm = llm
+        self.turn_timeout = turn_timeout
+        self.compliance_identifier = compliance_identifier
         self.states: dict[str, DebateState] = {}
+        self.timeout_tasks: dict[str, asyncio.Task[None]] = {}
+        self.last_messages: dict[str, PlatformMessage] = {}
+        self.histories: dict[str, HistoryProvider] = {}
 
     async def on_message(
         self,
@@ -71,7 +86,35 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
             )
             return
 
+        self._cancel_timeout(room_id)
+        self.last_messages[room_id] = msg
+        self.histories[room_id] = history
+        state.transcript.append(
+            f"[{msg.sender_name or msg.sender_type}]: {msg.content}"
+        )
+
         if state.phase == DebatePhase.IDLE:
+            normalized = msg.content.lower()
+            if "ping" in normalized:
+                initiator = self._mention_for(msg)
+                await tools.send_message(
+                    "⚖️ PONG — Arbiter is online and ready for a purchase case.",
+                    mentions=[initiator],
+                )
+                return
+            if "researcher" in normalized and any(
+                word in normalized for word in ("привіт", "hello", "hi", "greet")
+            ):
+                state.initiator = msg.sender_name or msg.sender_id
+                state.phase = DebatePhase.CHAIN_RESEARCHER
+                await tools.send_message(
+                    "⚖️ CONNECTION TEST\n"
+                    "@Researcher reply with one short greeting, then return control to @Arbiter.\n"
+                    "HANDOFF: @Researcher | STATE: CHAIN_TEST | REQUEST: greeting",
+                    mentions=["@Researcher"],
+                )
+                self._schedule_timeout(room_id, tools)
+                return
             state.case = msg.content
             state.initiator = msg.sender_name or msg.sender_id
             state.phase = DebatePhase.RESEARCH
@@ -84,6 +127,17 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
                 "HANDOFF: @Researcher | STATE: RESEARCH | REQUEST: sourced fact list",
                 mentions=["@Researcher"],
             )
+        elif state.phase == DebatePhase.CHAIN_RESEARCHER:
+            initiator = (
+                state.initiator
+                if state.initiator.startswith("@")
+                else f"@{state.initiator}"
+            )
+            await tools.send_message(
+                "⚖️ CONNECTION TEST PASSED — Arbiter → Researcher → Arbiter.",
+                mentions=[initiator],
+            )
+            self.states[room_id] = DebateState()
         elif state.phase == DebatePhase.RESEARCH:
             state.phase = DebatePhase.SCOUTING
             await tools.send_message(
@@ -123,6 +177,7 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
                 state.phase = DebatePhase.ROUND_1_ADVOCATE
                 await self._ask_advocate(tools)
         elif state.phase == DebatePhase.COMPLIANCE:
+            state.compliance_reviewed = True
             state.phase = DebatePhase.ROUND_1_ADVOCATE
             await self._ask_advocate(tools)
         elif state.phase == DebatePhase.ROUND_1_ADVOCATE:
@@ -144,25 +199,10 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
                 mentions=["@Advocate"],
             )
         elif state.phase == DebatePhase.ROUND_2_ADVOCATE:
-            verdict = await self._make_verdict(state, msg, history)
-            initiator = (
-                state.initiator
-                if state.initiator.startswith("@")
-                else f"@{state.initiator}"
-            )
-            await tools.send_message(
-                f"{self._format_verdict(verdict)}\n{initiator}",
-                mentions=[initiator],
-            )
-            await tools.send_event(
-                content=json.dumps(verdict, ensure_ascii=False),
-                message_type="task",
-                metadata={"kind": "verdict", "room_id": room_id},
-            )
-            self._save_verdict(room_id, verdict)
-            self.states[room_id] = DebateState()
+            await self._finalize_verdict(room_id, state, msg, history, tools)
 
         logger.info("%s -> %s", previous, self.states[room_id].phase)
+        self._schedule_timeout(room_id, tools)
 
     async def _ask_advocate(self, tools: AgentToolsProtocol) -> None:
         await tools.send_message(
@@ -176,7 +216,8 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
     async def _recruit_compliance(self, tools: AgentToolsProtocol) -> bool:
         try:
             await tools.lookup_peers()
-            await tools.add_participant("Compliance")
+            await tools.add_participant(self.compliance_identifier)
+            await tools.get_participants()
             await tools.send_event(
                 content="Compliance specialist dynamically recruited.",
                 message_type="task",
@@ -195,12 +236,13 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
         msg: PlatformMessage,
         history: HistoryProvider,
     ) -> dict[str, Any]:
-        transcript = "\n".join(
+        hydrated_history = "\n".join(
             f"[{item.get('sender_name') or item.get('sender_type', 'Unknown')}]: "
             f"{item.get('content', '')}"
             for item in history.raw[-30:]
         )
-        transcript += f"\n[{msg.sender_name or msg.sender_type}]: {msg.content}"
+        transcript_parts = [hydrated_history, *state.transcript]
+        transcript = "\n".join(part for part in transcript_parts if part)
         prompt = f"""
 You are the neutral Arbiter. Produce ONLY valid JSON for the purchase case below.
 Scores are integers 0-25 and total must equal their sum.
@@ -236,9 +278,9 @@ Transcript:
         )
         try:
             verdict = json.loads(self._extract_json(text))
-            scores = verdict["scores"]
-            verdict["total"] = sum(int(value) for value in scores.values())
-            verdict["compliance_reviewed"] = state.compliance_requested
+            verdict = self._normalize_verdict(verdict, state)
+            verdict["compliance_reviewed"] = state.compliance_reviewed
+            verdict["evidence_gaps"] = state.missing_agents
             return verdict
         except Exception:
             logger.exception("Invalid verdict JSON; using safe fallback")
@@ -257,7 +299,8 @@ Transcript:
                 ],
                 "conditions": ["Human review required before purchase."],
                 "dissent": "The evidence may support a different decision.",
-                "compliance_reviewed": state.compliance_requested,
+                "compliance_reviewed": state.compliance_reviewed,
+                "evidence_gaps": state.missing_agents,
             }
 
     @staticmethod
@@ -275,6 +318,7 @@ Transcript:
         scores = verdict["scores"]
         rationale = "\n".join(f"- {item}" for item in verdict.get("rationale", []))
         conditions = "\n".join(f"- {item}" for item in verdict.get("conditions", []))
+        scorecard = json.dumps(verdict, ensure_ascii=False, indent=2)
         return (
             "⚖️ FINAL VERDICT\n"
             f"Recommendation: **{verdict['recommendation']}**\n"
@@ -285,8 +329,31 @@ Transcript:
             f"- Alternatives: {scores['alternatives']}/25\n"
             f"Rationale:\n{rationale}\n"
             f"Conditions:\n{conditions or '- None'}\n"
-            f"Dissent: {verdict.get('dissent', 'None')}"
+            f"Dissent: {verdict.get('dissent', 'None')}\n"
+            f"```json\n{scorecard}\n```"
         )
+
+    @staticmethod
+    def _normalize_verdict(
+        verdict: dict[str, Any], state: DebateState
+    ) -> dict[str, Any]:
+        raw_scores = verdict.get("scores", {})
+        keys = ("value_for_money", "capability_fit", "risk_profile", "alternatives")
+        scores = {key: max(0, min(25, int(raw_scores.get(key, 0)))) for key in keys}
+        recommendation = str(verdict.get("recommendation", "BUY_WITH_CONDITIONS"))
+        if recommendation not in {"BUY", "BUY_WITH_CONDITIONS", "AVOID"}:
+            recommendation = "BUY_WITH_CONDITIONS"
+        return {
+            "case": str(verdict.get("case") or state.case),
+            "scores": scores,
+            "total": sum(scores.values()),
+            "recommendation": recommendation,
+            "rationale": [str(item) for item in verdict.get("rationale", [])][:5],
+            "conditions": [str(item) for item in verdict.get("conditions", [])][:5],
+            "dissent": str(verdict.get("dissent", "None")),
+            "compliance_reviewed": state.compliance_reviewed,
+            "evidence_gaps": list(state.missing_agents),
+        }
 
     @staticmethod
     def _save_verdict(room_id: str, verdict: dict[str, Any]) -> Path:
@@ -306,6 +373,7 @@ Transcript:
     @staticmethod
     def _is_expected_sender(phase: DebatePhase, msg: PlatformMessage) -> bool:
         expected = {
+            DebatePhase.CHAIN_RESEARCHER: "researcher",
             DebatePhase.RESEARCH: "researcher",
             DebatePhase.SCOUTING: "scout",
             DebatePhase.ROUND_1_CRITIC: "critic",
@@ -318,13 +386,162 @@ Transcript:
             return True
         return expected in (msg.sender_name or "").strip().lower()
 
+    @staticmethod
+    def _mention_for(msg: PlatformMessage) -> str:
+        value = msg.sender_name or msg.sender_id
+        return value if value.startswith("@") else f"@{value}"
+
+    @staticmethod
+    def _expected_handle(phase: DebatePhase) -> str:
+        return {
+            DebatePhase.CHAIN_RESEARCHER: "@Researcher",
+            DebatePhase.RESEARCH: "@Researcher",
+            DebatePhase.SCOUTING: "@Scout",
+            DebatePhase.ROUND_1_CRITIC: "@Critic",
+            DebatePhase.COMPLIANCE: "@Compliance",
+            DebatePhase.ROUND_1_ADVOCATE: "@Advocate",
+            DebatePhase.ROUND_2_CRITIC: "@Critic",
+            DebatePhase.ROUND_2_ADVOCATE: "@Advocate",
+        }[phase]
+
+    async def _finalize_verdict(
+        self,
+        room_id: str,
+        state: DebateState,
+        msg: PlatformMessage,
+        history: HistoryProvider,
+        tools: AgentToolsProtocol,
+    ) -> None:
+        verdict = await self._make_verdict(state, msg, history)
+        initiator = (
+            state.initiator
+            if state.initiator.startswith("@")
+            else f"@{state.initiator}"
+        )
+        await tools.send_message(
+            f"{self._format_verdict(verdict)}\n{initiator}",
+            mentions=[initiator],
+        )
+        await tools.send_event(
+            content=json.dumps(verdict, ensure_ascii=False),
+            message_type="task",
+            metadata={"kind": "verdict", "room_id": room_id},
+        )
+        self._save_verdict(room_id, verdict)
+        self.states[room_id] = DebateState()
+        self._cancel_timeout(room_id)
+
+    def _cancel_timeout(self, room_id: str) -> None:
+        task = self.timeout_tasks.pop(room_id, None)
+        if task and task is not asyncio.current_task():
+            task.cancel()
+
+    def _schedule_timeout(self, room_id: str, tools: AgentToolsProtocol) -> None:
+        if not self.turn_timeout or self.states[room_id].phase == DebatePhase.IDLE:
+            return
+        self._cancel_timeout(room_id)
+        self.timeout_tasks[room_id] = asyncio.create_task(
+            self._watch_turn(room_id, self.states[room_id].phase, tools)
+        )
+
+    async def _watch_turn(
+        self,
+        room_id: str,
+        phase: DebatePhase,
+        tools: AgentToolsProtocol,
+    ) -> None:
+        try:
+            await asyncio.sleep(self.turn_timeout or 0)
+            if self.states[room_id].phase != phase:
+                return
+            expected = self._expected_handle(phase)
+            await tools.send_message(
+                f"⚖️ TIMEOUT REMINDER\n{expected} please complete the pending turn. "
+                "This is the only retry.",
+                mentions=[expected],
+            )
+            await asyncio.sleep(self.turn_timeout or 0)
+            if self.states[room_id].phase != phase:
+                return
+            self.states[room_id].missing_agents.append(expected.lstrip("@"))
+            logger.warning(
+                "%s timed out twice in room %s; continuing", expected, room_id
+            )
+            await self._advance_after_timeout(room_id, tools)
+        except asyncio.CancelledError:
+            return
+
+    async def _advance_after_timeout(
+        self, room_id: str, tools: AgentToolsProtocol
+    ) -> None:
+        state = self.states[room_id]
+        phase = state.phase
+        if phase in {DebatePhase.CHAIN_RESEARCHER}:
+            initiator = (
+                state.initiator
+                if state.initiator.startswith("@")
+                else f"@{state.initiator}"
+            )
+            await tools.send_message(
+                "⚖️ CONNECTION TEST FAILED — Researcher did not answer.",
+                mentions=[initiator],
+            )
+            self.states[room_id] = DebateState()
+            return
+        if phase == DebatePhase.RESEARCH:
+            state.phase = DebatePhase.SCOUTING
+            await tools.send_message(
+                "⚖️ RESEARCH TIMED OUT\n"
+                "@Scout compare 2-3 alternatives using available room evidence.\n"
+                "HANDOFF: @Scout | STATE: SCOUTING | REQUEST: alternative comparison",
+                mentions=["@Scout"],
+            )
+        elif phase == DebatePhase.SCOUTING:
+            state.phase = DebatePhase.ROUND_1_CRITIC
+            await tools.send_message(
+                "⚖️ SCOUTING TIMED OUT\n"
+                "@Critic present the strongest evidence-based objections.\n"
+                "HANDOFF: @Critic | STATE: ROUND_1 | REQUEST: strongest objections",
+                mentions=["@Critic"],
+            )
+        elif phase in {DebatePhase.ROUND_1_CRITIC, DebatePhase.COMPLIANCE}:
+            state.phase = DebatePhase.ROUND_1_ADVOCATE
+            await self._ask_advocate(tools)
+        elif phase == DebatePhase.ROUND_1_ADVOCATE:
+            state.phase = DebatePhase.ROUND_2_CRITIC
+            await tools.send_message(
+                "⚖️ DEFENSE TIMED OUT\n"
+                "@Critic identify only unresolved objections for the closing round.\n"
+                "HANDOFF: @Critic | STATE: ROUND_2 | REQUEST: unresolved objections",
+                mentions=["@Critic"],
+            )
+        elif phase == DebatePhase.ROUND_2_CRITIC:
+            state.phase = DebatePhase.ROUND_2_ADVOCATE
+            await tools.send_message(
+                "⚖️ REBUTTAL TIMED OUT\n"
+                "@Advocate give the final defense and purchase conditions.\n"
+                "HANDOFF: @Advocate | STATE: ROUND_2 | REQUEST: final defense",
+                mentions=["@Advocate"],
+            )
+        elif phase == DebatePhase.ROUND_2_ADVOCATE:
+            msg = self.last_messages[room_id]
+            history = self.histories.get(room_id, HistoryProvider(raw=[]))
+            await self._finalize_verdict(room_id, state, msg, history, tools)
+            return
+        self._schedule_timeout(room_id, tools)
+
 
 def build_arbiter_agent(
     credentials: AgentCredentials,
     settings: Settings,
+    compliance_identifier: str = "Compliance",
 ) -> Agent:
     return Agent.create(
-        adapter=ArbiterAdapter(make_llm("arbiter", settings)),
+        adapter=ArbiterAdapter(
+            make_llm("arbiter", settings),
+            turn_timeout=settings.debate_turn_timeout,
+            compliance_identifier=compliance_identifier,
+        ),
         agent_id=credentials.agent_id,
         api_key=credentials.api_key,
         rest_url=settings.band_rest_url,
