@@ -1,0 +1,19 @@
+arbiter:
+  agent_id: "<uuid>"
+  api_key: "<one-time-api-key>"
+researcher:
+  agent_id: "<uuid>"
+  api_key: "<one-time-api-key>"
+scout:
+  agent_id: "<uuid>"
+  api_key: "<one-time-api-key>"
+advocate:
+  agent_id: "<uuid>"
+  api_key: "<one-time-api-key>"
+critic:
+  agent_id: "<uuid>"
+  api_key: "<one-time-api-key>"
+compliance:
+  agent_id: "<uuid>"
+  api_key: "<one-time-api-key>"
+
