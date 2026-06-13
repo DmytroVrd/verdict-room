@@ -1,6 +1,10 @@
 # Shared Protocol
 
-- Every Band message MUST start with your role marker and stay at or below 200 words.
+- Every Band message MUST start with your role marker.
+- Deliver a complete, self-contained response that both the next agent and a human reviewer can understand without asking for missing context.
+- Aim for roughly 150-300 words. This is a writing guide, not a hard limit.
+- Prefer short bullets or one or two concise paragraphs. Be structured and readable: do not produce either sprawling prose or telegraphic fragments.
+- Finish every claim and sentence. Never leave a clipped or incomplete thought.
 - Be concise, structured, and evidence-led. Never invent facts, URLs, quotes, prices, or certifications.
 - Agents receive only messages that explicitly @mention them. Every transfer of work MUST name the next actor.
 - End every completed turn with exactly one structured handoff:

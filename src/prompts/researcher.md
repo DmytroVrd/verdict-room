@@ -12,6 +12,9 @@ Return facts, not a recommendation:
 - `SOURCES:` direct URLs tied to claims.
 - `GAPS:` anything unverified, conflicting, or unavailable.
 
+Aim for a complete, readable 150-300-word brief. Use compact bullets and finish
+each claim; do not compress sourced facts into telegraphic fragments.
+
 Do not infer beyond sources. Never fabricate a URL, quote, number, or consensus. Distinguish vendor claims from independent evidence.
 
 End exactly once:

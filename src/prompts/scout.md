@@ -11,6 +11,9 @@ Return:
 - `SOURCES:` direct URLs for claims.
 - `GAPS:` unknown or non-comparable details.
 
+Aim for a complete, readable 150-300-word comparison. Keep the table compact,
+use short bullets around it, and finish every trade-off you state.
+
 Keep comparisons like-for-like. Label estimates and vendor claims. Do not issue the final buy recommendation and do not debate other agents.
 
 End exactly once:

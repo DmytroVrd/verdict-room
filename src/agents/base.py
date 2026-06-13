@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from band import AdapterFeatures, Agent, Emit
@@ -12,6 +13,8 @@ from src.common.config import PROJECT_ROOT, AgentCredentials, Settings
 from src.common.llm import make_llm
 
 logger = logging.getLogger(__name__)
+
+EMERGENCY_WORD_LIMIT = 600
 
 DELIVERY_CONTRACT = """
 
@@ -33,6 +36,51 @@ ROLE_DELIVERY = {
         "begin ROUND_1 with @Critic",
     ),
 }
+
+
+def prepare_worker_delivery(
+    content: str,
+    *,
+    handoff: str,
+    marker: str | None = None,
+) -> str:
+    """Normalize a worker response and apply only a high emergency length guard."""
+    handoff_pattern = re.compile(r"(?im)^\s*HANDOFF:\s*.*$")
+    body = handoff_pattern.sub("", content)
+    body = "\n".join(
+        line.strip() for line in body.splitlines() if line.strip()
+    ).strip()
+
+    if not body:
+        body = "GAPS: No usable model response was produced."
+    if marker and not body.startswith(marker):
+        body = f"{marker} {body}"
+
+    body_budget = max(1, EMERGENCY_WORD_LIMIT - len(handoff.split()))
+    body = truncate_at_sentence_boundary(body, body_budget)
+    return f"{body}\n\n{handoff}"
+
+
+def truncate_at_sentence_boundary(text: str, word_limit: int) -> str:
+    words = list(re.finditer(r"\S+", text))
+    if len(words) <= word_limit:
+        return text
+
+    target = words[word_limit - 1].end()
+    sentence_ends = [
+        match.end()
+        for match in re.finditer(r"""[.!?](?:["')\]]+)?(?=\s|$)""", text)
+    ]
+    before_target = [end for end in sentence_ends if end <= target]
+    if before_target:
+        cutoff = before_target[-1]
+    else:
+        after_target = [end for end in sentence_ends if end > target]
+        if not after_target:
+            # Keeping the complete thought is safer than manufacturing a fragment.
+            return text
+        cutoff = after_target[0]
+    return text[:cutoff].rstrip()
 
 
 def load_prompt(role: str) -> str:
@@ -108,18 +156,7 @@ class ReliableLangGraphAdapter(LangGraphAdapter):
     def _prepare_delivery(self, content: str) -> str:
         marker, state, request = ROLE_DELIVERY[self.role]
         handoff = f"HANDOFF: @Arbiter | STATE: {state} | REQUEST: {request}"
-        cleaned = " ".join(content.split())
-        if not cleaned:
-            cleaned = f"{marker} GAPS: No usable model response was produced."
-        elif not cleaned.startswith(marker):
-            cleaned = f"{marker} {cleaned}"
-        if "HANDOFF:" in cleaned:
-            cleaned = cleaned.split("HANDOFF:", 1)[0].rstrip()
-        budget = 200 - len(handoff.split())
-        words = cleaned.split()
-        if len(words) > budget:
-            cleaned = " ".join(words[:budget]).rstrip(" ,;:")
-        return f"{cleaned}\n\n{handoff}"
+        return prepare_worker_delivery(content, handoff=handoff, marker=marker)
 
     @classmethod
     def _extract_text(cls, value: Any) -> str:

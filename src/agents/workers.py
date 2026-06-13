@@ -9,7 +9,7 @@ from band.core.types import HistoryProvider, PlatformMessage
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import StructuredTool
 
-from src.agents.base import build_langgraph_agent, load_prompt
+from src.agents.base import build_langgraph_agent, load_prompt, prepare_worker_delivery
 from src.common.config import AgentCredentials, Settings
 from src.common.llm import make_llm
 
@@ -55,6 +55,21 @@ class TextWorkerAdapter(SimpleAdapter[HistoryProvider]):
         self.llm = llm
         self.instructions = instructions
 
+    def _fallback_handoff(self) -> str:
+        return (
+            f"HANDOFF: @Arbiter | STATE: {self.role.upper()}_COMPLETE "
+            "| REQUEST: continue the protocol"
+        )
+
+    def _prepare_delivery(self, content: str) -> str:
+        handoff_lines = [
+            line.strip()
+            for line in content.splitlines()
+            if line.strip().startswith("HANDOFF:")
+        ]
+        handoff = handoff_lines[-1] if handoff_lines else self._fallback_handoff()
+        return prepare_worker_delivery(content, handoff=handoff)
+
     async def on_message(
         self,
         msg: PlatformMessage,
@@ -74,8 +89,11 @@ class TextWorkerAdapter(SimpleAdapter[HistoryProvider]):
         )
         prompt = (
             f"{self.instructions}\n\n"
-            "Return only the final Band message, at most 200 words. "
-            "Do not wrap it in commentary.\n\n"
+            "Return only the complete final Band message. Aim for 150-300 words "
+            "using short bullets or one or two concise paragraphs. Make it "
+            "self-contained and readable by both the other agents and a human "
+            "reviewer. Never end with an unfinished thought. Do not wrap it in "
+            "commentary.\n\n"
             f"Room context:\n{transcript}\n"
             f"Current request:\n[{msg.sender_name or msg.sender_type}]: {msg.content}"
         )
@@ -85,4 +103,7 @@ class TextWorkerAdapter(SimpleAdapter[HistoryProvider]):
             if isinstance(response.content, str)
             else str(response.content)
         ).strip()
-        await tools.send_message(content, mentions=["@Arbiter"])
+        await tools.send_message(
+            self._prepare_delivery(content),
+            mentions=["@Arbiter"],
+        )
