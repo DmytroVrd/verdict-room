@@ -133,6 +133,24 @@ def test_text_worker_guard_preserves_one_existing_handoff() -> None:
     assert handoff == expected
 
 
+def test_text_worker_normalizes_markdown_handoff() -> None:
+    adapter = TextWorkerAdapter(
+        role="advocate",
+        llm=FakeListChatModel(responses=["unused"]),
+        instructions="Be concise.",
+    )
+    content = adapter._prepare_delivery(
+        "✅ Complete defense.\n"
+        "**HANDOFF:** @Arbiter | STATE: ROUND_1_ADVOCATE_COMPLETE "
+        "| REQUEST: continue**"
+    )
+    assert content.count("HANDOFF:") == 1
+    assert "**HANDOFF:**" not in content
+    assert content.endswith(
+        "HANDOFF: @Arbiter | STATE: ROUND_1_ADVOCATE_COMPLETE | REQUEST: continue"
+    )
+
+
 def test_shared_prompt_uses_soft_length_guidance() -> None:
     prompt = load_prompt("critic")
     assert "roughly 150-300 words" in prompt
@@ -148,6 +166,151 @@ def test_debate_prompts_forbid_unsupported_facts(role: str) -> None:
     assert "Data unavailable in CASE BRIEF / EVIDENCE DIGEST." in prompt
     assert "HYPOTHESIS" in prompt
     assert "Never invent" in prompt
+
+
+def test_advocate_omits_unsupported_calculations_and_pilot_size() -> None:
+    adapter = TextWorkerAdapter(
+        role="advocate",
+        llm=FakeListChatModel(responses=["unused"]),
+        instructions="Be concise.",
+    )
+    evidence = (
+        "CASE BRIEF: 50-person company.\n"
+        "EVIDENCE DIGEST: Notion costs $20/user/month."
+    )
+    response = (
+        "✅ EVIDENCE: Notion costs $20/user/month.\n"
+        "- Derived annual cost is $12,000.\n"
+        "- Pilot with 5-10 people for one billing cycle.\n"
+        "HANDOFF: @Arbiter | STATE: ROUND_1_ADVOCATE_COMPLETE | REQUEST: continue"
+    )
+    cleaned = adapter._remove_unsupported_numeric_claims(response, evidence)
+    assert "$20/user/month" in cleaned
+    assert "$12,000" not in cleaned
+    assert "5-10 people" not in cleaned
+    assert "one billing cycle" not in cleaned
+    assert cleaned.count("DATA UNAVAILABLE") == 1
+    assert "HANDOFF: @Arbiter" in cleaned
+
+
+def test_advocate_omits_hyphenated_unsupported_duration() -> None:
+    adapter = TextWorkerAdapter(
+        role="advocate",
+        llm=FakeListChatModel(responses=["unused"]),
+        instructions="Be concise.",
+    )
+    cleaned = adapter._remove_unsupported_numeric_claims(
+        "✅ Run a 3-month trial.\nHANDOFF: @Arbiter | STATE: DONE | REQUEST: next",
+        "CASE BRIEF: 50-person team. EVIDENCE DIGEST: Business plan is monthly.",
+    )
+    assert "3-month" not in cleaned
+    assert "Run a trial." in cleaned
+
+
+def test_advocate_scrubs_prescriptive_numbers_even_when_token_exists_elsewhere() -> None:
+    adapter = TextWorkerAdapter(
+        role="advocate",
+        llm=FakeListChatModel(responses=["unused"]),
+        instructions="Be concise.",
+    )
+    cleaned = adapter._remove_unsupported_numeric_claims(
+        (
+            "Conduct a fixed-price pilot for 10 users to validate feature fit.\n"
+            "Perform a controlled migration test for one team to assess disruption."
+        ),
+        (
+            "CASE BRIEF: 50-person company.\n"
+            "EVIDENCE DIGEST: The free plan supports up to 10 users."
+        ),
+    )
+    assert "10 users" not in cleaned
+    assert "one team" not in cleaned
+    assert "Conduct a fixed-price pilot to validate feature fit." in cleaned
+    assert "Perform a controlled migration test to assess disruption." in cleaned
+
+
+def test_advocate_keeps_case_size_when_pilot_appears_later_in_same_line() -> None:
+    adapter = TextWorkerAdapter(
+        role="advocate",
+        llm=FakeListChatModel(responses=["unused"]),
+        instructions="Be concise.",
+    )
+    response = (
+        "For a 50-person company, the risks define due diligence: "
+        "a pilot for workflow fit."
+    )
+    assert (
+        adapter._remove_unsupported_numeric_claims(
+            response,
+            "CASE BRIEF: A 50-person company.",
+        )
+        == response
+    )
+
+
+def test_critic_omits_export_claim_contradicted_by_evidence() -> None:
+    adapter = TextWorkerAdapter(
+        role="critic",
+        llm=FakeListChatModel(responses=["unused"]),
+        instructions="Be concise.",
+    )
+    cleaned = adapter._remove_unsupported_numeric_claims(
+        "EVIDENCE: Notion export is limited to markdown.",
+        "EVIDENCE DIGEST: Notion exports to markdown, HTML, CSV, and PDF.",
+    )
+    assert "limited to markdown" not in cleaned
+    assert "DATA UNAVAILABLE" in cleaned
+
+
+def test_debate_claim_does_not_become_authoritative_by_repetition() -> None:
+    adapter = TextWorkerAdapter(
+        role="critic",
+        llm=FakeListChatModel(responses=["unused"]),
+        instructions="Be concise.",
+    )
+    cleaned = adapter._remove_unsupported_numeric_claims(
+        "EVIDENCE: Notion export is limited to markdown.",
+        (
+            "CASE BRIEF:\nCompare workspace tools.\n"
+            "EVIDENCE DIGEST:\n"
+            "ADVOCATE R1:\nNotion export is limited to markdown.\n"
+            "FACTS:\nNotion exports to markdown, HTML, CSV, and PDF."
+        ),
+    )
+    assert "limited to markdown" not in cleaned
+    assert "DATA UNAVAILABLE" in cleaned
+
+
+def test_critic_omits_unsupported_certification_absence() -> None:
+    adapter = TextWorkerAdapter(
+        role="critic",
+        llm=FakeListChatModel(responses=["unused"]),
+        instructions="Be concise.",
+    )
+    cleaned = adapter._remove_unsupported_numeric_claims(
+        (
+            "Notion lacks explicit certifications like SOC 2, which Slite holds.\n"
+            "HANDOFF: @Arbiter | STATE: DONE | REQUEST: next"
+        ),
+        "EVIDENCE DIGEST: Slite has SOC 2. Notion certification data is unavailable.",
+    )
+    assert "Notion lacks" not in cleaned
+    assert "DATA UNAVAILABLE" in cleaned
+    assert "HANDOFF: @Arbiter" in cleaned
+
+
+def test_critic_keeps_structural_and_supported_numbers() -> None:
+    adapter = TextWorkerAdapter(
+        role="critic",
+        llm=FakeListChatModel(responses=["unused"]),
+        instructions="Be concise.",
+    )
+    evidence = "CASE BRIEF: 50-person team. EVIDENCE DIGEST: SOC 2."
+    response = (
+        "❌ Top 3 risks for 50 users.\n"
+        "1. SOC 2/HIPAA is documented for the alternative."
+    )
+    assert adapter._remove_unsupported_numeric_claims(response, evidence) == response
 
 
 @pytest.mark.asyncio

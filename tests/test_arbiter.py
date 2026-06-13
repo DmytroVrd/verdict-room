@@ -348,3 +348,32 @@ def test_context_block_preserves_complete_evidence_without_ellipsis() -> None:
     assert "…" not in block
     assert "CASE BRIEF:\nA complete purchase case." in block
     assert "EVIDENCE DIGEST:\nFACTS:\n" in block
+
+
+def test_ground_verdict_removes_unsupported_duration_and_absence_claim() -> None:
+    verdict = {
+        "rationale": [
+            "Notion lacks SOC 2 certification unlike Slite.",
+            "SOC 2 and HIPAA are present in Slite but not in Notion.",
+            "Notion Business costs $20 per user.",
+        ],
+        "conditions": [
+            "Run a 3-month trial.",
+            "Conduct a fixed-price pilot for 10 users.",
+        ],
+        "dissent": "No audit report proves the control environment.",
+    }
+    grounded = ArbiterAdapter._ground_verdict(
+        verdict,
+        "EVIDENCE: Notion Business costs $20 per user. Slite has SOC 2.",
+    )
+    assert grounded["rationale"][0].startswith(
+        "Independent certification evidence"
+    )
+    assert grounded["rationale"][1].startswith(
+        "Independent certification evidence"
+    )
+    assert grounded["rationale"][2] == "Notion Business costs $20 per user."
+    assert "3-month" not in grounded["conditions"][0]
+    assert "10 users" not in grounded["conditions"][1]
+    assert grounded["dissent"].startswith("Independent certification evidence")

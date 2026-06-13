@@ -16,6 +16,7 @@ from band.core.types import HistoryProvider, PlatformMessage
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.agents.base import EMERGENCY_WORD_LIMIT, truncate_at_sentence_boundary
+from src.agents.workers import remove_unsupported_numeric_claims
 from src.common.config import PROJECT_ROOT, AgentCredentials, Settings
 from src.common.llm import make_llm
 
@@ -195,7 +196,7 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
                         state,
                         tools,
                         "⚖️ SPECIALIST REVIEW\n"
-                        f"{self._context_block(state, include=('research', 'scout', 'critic1'))}\n"
+                        f"{self._context_block(state, include=('critic1', 'research', 'scout'))}\n"
                         "@Compliance assess data residency, GDPR/privacy, certifications, and contractual risk. "
                         "Return control to @Arbiter.\n"
                         "HANDOFF: @Compliance | STATE: RECRUIT | REQUEST: compliance opinion",
@@ -219,7 +220,7 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
                 state,
                 tools,
                 "⚖️ ROUND 2: REBUTTAL\n"
-                f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance', 'advocate1'))}\n"
+                f"{self._context_block(state, include=('advocate1', 'critic1', 'compliance', 'research', 'scout'))}\n"
                 "@Critic strengthen only the objections that remain unresolved. Do not repeat closed points. "
                 "Return control to @Arbiter.\n"
                 "HANDOFF: @Critic | STATE: ROUND_2 | REQUEST: unresolved objections",
@@ -232,7 +233,7 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
                 state,
                 tools,
                 "⚖️ ROUND 2: CLOSING\n"
-                f"{self._context_block(state, include=('research', 'scout', 'critic2', 'compliance'))}\n"
+                f"{self._context_block(state, include=('critic2', 'compliance', 'research', 'scout'))}\n"
                 "@Advocate give a concise closing statement. Address the remaining objections point by point "
                 "and state any purchase conditions. Return control to @Arbiter.\n"
                 "HANDOFF: @Advocate | STATE: ROUND_2 | REQUEST: final defense",
@@ -251,7 +252,7 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
             state,
             tools,
             "⚖️ ROUND 1: DEFENSE\n"
-            f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance'))}\n"
+            f"{self._context_block(state, include=('critic1', 'compliance', 'research', 'scout'))}\n"
             "@Advocate answer the Critic point by point using room evidence only. "
             "Concede unsupported claims and propose concrete safeguards. Return control to @Arbiter.\n"
             "HANDOFF: @Advocate | STATE: ROUND_1 | REQUEST: point-by-point defense",
@@ -293,6 +294,9 @@ You are the neutral Arbiter. Produce ONLY valid JSON for the purchase case below
 Scores are integers 0-25 and total must equal their sum.
 recommendation must be BUY, BUY_WITH_CONDITIONS, or AVOID.
 Keep rationale to 3-5 short strings and dissent to one strong opposing argument.
+Use only facts and numbers present in the transcript. Do not calculate new
+totals, infer that a missing certification is absent, or turn an evidence gap
+into a negative fact. When evidence is missing, describe it as unknown.
 
 Schema:
 {{
@@ -324,6 +328,10 @@ Transcript:
         try:
             verdict = json.loads(self._extract_json(text))
             verdict = self._normalize_verdict(verdict, state)
+            verdict = self._ground_verdict(
+                verdict,
+                self._context_block(state, include=("research", "scout")),
+            )
             verdict["compliance_reviewed"] = state.compliance_reviewed
             verdict["evidence_gaps"] = state.missing_agents
             return verdict
@@ -399,6 +407,48 @@ Transcript:
             "compliance_reviewed": state.compliance_reviewed,
             "evidence_gaps": list(state.missing_agents),
         }
+
+    @classmethod
+    def _ground_verdict(
+        cls,
+        verdict: dict[str, Any],
+        transcript: str,
+    ) -> dict[str, Any]:
+        def grounded(value: str) -> str:
+            if re.search(
+                r"(?:"
+                r"\b(?:lacks?|without|no)\b.{0,100}"
+                r"\b(?:soc\s*2|iso\s*27001|certification|audit report)"
+                r"|"
+                r"\b(?:soc\s*2|iso\s*27001|certifications?|audit reports?)\b"
+                r".{0,120}\b(?:but\s+)?not\s+(?:in|for|on)\b"
+                r")",
+                value,
+                re.IGNORECASE,
+            ):
+                return (
+                    "Independent certification evidence for the evaluated product "
+                    "is unavailable in the debate record."
+                )
+            cleaned, unsupported = remove_unsupported_numeric_claims(
+                value,
+                transcript,
+            )
+            if unsupported:
+                cleaned = cleaned.replace(
+                    "- DATA UNAVAILABLE: ",
+                    "Data unavailable: ",
+                )
+            return cleaned.strip() or "Data unavailable in the debate record."
+
+        verdict["rationale"] = [
+            grounded(str(item)) for item in verdict.get("rationale", [])
+        ]
+        verdict["conditions"] = [
+            grounded(str(item)) for item in verdict.get("conditions", [])
+        ]
+        verdict["dissent"] = grounded(str(verdict.get("dissent", "")))
+        return verdict
 
     @staticmethod
     def _save_verdict(room_id: str, verdict: dict[str, Any]) -> Path:
@@ -655,7 +705,7 @@ Transcript:
                 state,
                 tools,
                 "⚖️ DEFENSE TIMED OUT\n"
-                f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance'))}\n"
+                f"{self._context_block(state, include=('critic1', 'compliance', 'research', 'scout'))}\n"
                 "@Critic identify only unresolved objections for the closing round.\n"
                 "HANDOFF: @Critic | STATE: ROUND_2 | REQUEST: unresolved objections",
                 ["@Critic"],
@@ -666,7 +716,7 @@ Transcript:
                 state,
                 tools,
                 "⚖️ REBUTTAL TIMED OUT\n"
-                f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance'))}\n"
+                f"{self._context_block(state, include=('critic1', 'compliance', 'research', 'scout'))}\n"
                 "@Advocate give the final defense and purchase conditions.\n"
                 "HANDOFF: @Advocate | STATE: ROUND_2 | REQUEST: final defense",
                 ["@Advocate"],

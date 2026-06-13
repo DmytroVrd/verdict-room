@@ -15,6 +15,9 @@ from src.common.llm import make_llm
 logger = logging.getLogger(__name__)
 
 EMERGENCY_WORD_LIMIT = 600
+HANDOFF_LINE_PATTERN = re.compile(
+    r"(?im)^\s*(?:\*\*)?HANDOFF:(?:\*\*)?\s*.*$"
+)
 
 DELIVERY_CONTRACT = """
 
@@ -45,8 +48,7 @@ def prepare_worker_delivery(
     marker: str | None = None,
 ) -> str:
     """Normalize a worker response and apply only a high emergency length guard."""
-    handoff_pattern = re.compile(r"(?im)^\s*HANDOFF:\s*.*$")
-    body = handoff_pattern.sub("", content)
+    body = HANDOFF_LINE_PATTERN.sub("", content)
     body = "\n".join(
         line.strip() for line in body.splitlines() if line.strip()
     ).strip()
