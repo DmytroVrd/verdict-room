@@ -9,3 +9,7 @@ data/cache/
 data/verdicts/
 output/
 
+
+# internal working files (not for the public repo)
+TODO_CODEX.md
+ASK_CODEX.md
