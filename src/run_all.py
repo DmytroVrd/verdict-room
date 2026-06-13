@@ -28,6 +28,10 @@ async def main() -> None:
             credentials["arbiter"],
             settings,
             compliance_identifier=compliance_identifier,
+            mention_names={
+                item.agent_id: role.title()
+                for role, item in credentials.items()
+            },
         )
     ]
     for role in ROLES[1:]:

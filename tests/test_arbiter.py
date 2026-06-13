@@ -9,7 +9,7 @@ import pytest
 from band.core.types import HistoryProvider, PlatformMessage
 from langchain_core.language_models import FakeListChatModel
 
-from src.agents.arbiter import ArbiterAdapter, DebatePhase
+from src.agents.arbiter import ArbiterAdapter, DebatePhase, DebateState
 
 
 def test_extract_json_from_fence() -> None:
@@ -272,32 +272,79 @@ async def test_reply_cancels_previous_phase_timeout() -> None:
 
 
 def test_clean_case_replaces_raw_platform_mention() -> None:
+    adapter = ArbiterAdapter(
+        FakeListChatModel(responses=["unused"]),
+        mention_names={"12345678-1234-1234-1234-123456789abc": "Arbiter"},
+    )
     msg = message(
         "Dmytro",
         "@[[12345678-1234-1234-1234-123456789abc]] Analyze Notion for 50 users",
     )
-    assert ArbiterAdapter._clean_case(msg) == ("@Dmytro Analyze Notion for 50 users")
+    assert adapter._clean_case(msg) == "@Arbiter Analyze Notion for 50 users"
 
 
 def test_snapshot_strips_old_handoff_and_keeps_sources() -> None:
+    adapter = ArbiterAdapter(FakeListChatModel(responses=["unused"]))
     source = (
         "FACTS: Notion has tiered plans.\n"
         "SOURCES: https://www.notion.com/pricing https://example.com/review\n"
         "HANDOFF: @Arbiter | STATE: RESEARCH_COMPLETE | REQUEST: continue"
     )
-    snapshot = ArbiterAdapter._snapshot(source, max_urls=2)
+    snapshot = adapter._snapshot(source)
     assert "HANDOFF:" not in snapshot
     assert "https://www.notion.com/pricing" in snapshot
     assert "https://example.com/review" in snapshot
 
 
-def test_cap_message_keeps_single_handoff_under_200_words() -> None:
+def test_cap_message_keeps_normal_complete_message() -> None:
     content = (
         "ROUND\n"
-        + " ".join(["evidence"] * 300)
+        + " ".join(["Evidence is complete."] * 90)
         + "\nHANDOFF: @Critic | STATE: ROUND_1 | REQUEST: objections"
     )
     capped = ArbiterAdapter._cap_message(content)
-    assert len(capped.split()) <= 195
+    assert capped == content
+    assert len(capped.split()) > 200
+
+
+def test_cap_message_emergency_guard_ends_at_sentence_boundary() -> None:
+    content = (
+        "ROUND\n"
+        + " ".join(["Evidence is complete."] * 350)
+        + "\nHANDOFF: @Critic | STATE: ROUND_1 | REQUEST: objections"
+    )
+    capped = ArbiterAdapter._cap_message(content)
+    body, handoff = capped.rsplit("\n", 1)
+    assert body.endswith(".")
+    assert len(capped.split()) <= 600
     assert capped.count("HANDOFF:") == 1
-    assert capped.endswith("HANDOFF: @Critic | STATE: ROUND_1 | REQUEST: objections")
+    assert handoff == "HANDOFF: @Critic | STATE: ROUND_1 | REQUEST: objections"
+
+
+def test_snapshot_replaces_known_and_unknown_transport_mentions() -> None:
+    adapter = ArbiterAdapter(
+        FakeListChatModel(responses=["unused"]),
+        mention_names={"30afc890-73b4-494e-b7f1-fb2fd407ba98": "Arbiter"},
+    )
+    snapshot = adapter._snapshot(
+        "❌ @[[30afc890-73b4-494e-b7f1-fb2fd407ba98]] known; "
+        "@[[aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa]] unknown.\n"
+        "HANDOFF: @Arbiter | STATE: DONE | REQUEST: continue"
+    )
+    assert "@Arbiter" in snapshot
+    assert "@participant" in snapshot
+    assert "@[[" not in snapshot
+
+
+def test_context_block_preserves_complete_evidence_without_ellipsis() -> None:
+    adapter = ArbiterAdapter(FakeListChatModel(responses=["unused"]))
+    evidence = " ".join(["Complete evidence sentence."] * 80)
+    state = DebateState(
+        case="A complete purchase case.",
+        research_evidence=evidence,
+    )
+    block = adapter._context_block(state, include=("research",))
+    assert evidence in block
+    assert "…" not in block
+    assert "CASE BRIEF:\nA complete purchase case." in block
+    assert "EVIDENCE DIGEST:\nFACTS:\n" in block

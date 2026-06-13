@@ -15,6 +15,7 @@ from band.core.simple_adapter import SimpleAdapter
 from band.core.types import HistoryProvider, PlatformMessage
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from src.agents.base import EMERGENCY_WORD_LIMIT, truncate_at_sentence_boundary
 from src.common.config import PROJECT_ROOT, AgentCredentials, Settings
 from src.common.llm import make_llm
 
@@ -58,11 +59,16 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
         llm: BaseChatModel,
         turn_timeout: float | None = None,
         compliance_identifier: str = "Compliance",
+        mention_names: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         self.llm = llm
         self.turn_timeout = turn_timeout
         self.compliance_identifier = compliance_identifier
+        self.mention_names = {
+            identifier.lower(): name
+            for identifier, name in (mention_names or {}).items()
+        }
         self.states: dict[str, DebateState] = {}
         self.timeout_tasks: dict[str, asyncio.Task[None]] = {}
         self.last_messages: dict[str, PlatformMessage] = {}
@@ -98,7 +104,8 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
         self.last_messages[room_id] = msg
         self.histories[room_id] = history
         state.transcript.append(
-            f"[{msg.sender_name or msg.sender_type}]: {msg.content}"
+            f"[{msg.sender_name or msg.sender_type}]: "
+            f"{self._sanitize_mentions(msg.content)}"
         )
 
         if state.phase == DebatePhase.IDLE:
@@ -132,7 +139,7 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
                 state,
                 tools,
                 "⚖️ CASE OPENED\n"
-                f"CASE BRIEF: {self._brief(state.case, 55)}\n"
+                f"CASE BRIEF: {state.case}\n"
                 "- Process: research → alternatives → two debate rounds → verdict\n"
                 "@Researcher gather pricing, capabilities, company facts, and user complaints. "
                 "Cite real URLs and return control to @Arbiter.\n"
@@ -151,26 +158,26 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
             )
             self.states[room_id] = DebateState()
         elif state.phase == DebatePhase.RESEARCH:
-            state.research_evidence = self._snapshot(msg.content, max_urls=2)
+            state.research_evidence = self._snapshot(msg.content)
             state.phase = DebatePhase.SCOUTING
             await self._delegate(
                 state,
                 tools,
                 "⚖️ EVIDENCE RECEIVED\n"
-                f"{self._context_block(state, include=('research',), max_words=125)}\n"
+                f"{self._context_block(state, include=('research',))}\n"
                 "@Scout compare 2-3 credible alternatives using price, fit, and trade-offs. "
                 "Return control to @Arbiter.\n"
                 "HANDOFF: @Scout | STATE: SCOUTING | REQUEST: alternative comparison",
                 ["@Scout"],
             )
         elif state.phase == DebatePhase.SCOUTING:
-            state.scout_evidence = self._snapshot(msg.content, max_urls=1)
+            state.scout_evidence = self._snapshot(msg.content)
             state.phase = DebatePhase.ROUND_1_CRITIC
             await self._delegate(
                 state,
                 tools,
                 "⚖️ ROUND 1: CHALLENGE\n"
-                f"{self._context_block(state, include=('research', 'scout'), max_words=115)}\n"
+                f"{self._context_block(state, include=('research', 'scout'))}\n"
                 "@Critic present the strongest case AGAINST the purchase using only room evidence. "
                 "Call out hidden cost, lock-in, migration, security, and privacy. "
                 "Use the exact marker COMPLIANCE CONCERN when specialist review is needed. "
@@ -188,7 +195,7 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
                         state,
                         tools,
                         "⚖️ SPECIALIST REVIEW\n"
-                        f"{self._context_block(state, include=('research', 'scout', 'critic1'), max_words=115)}\n"
+                        f"{self._context_block(state, include=('research', 'scout', 'critic1'))}\n"
                         "@Compliance assess data residency, GDPR/privacy, certifications, and contractual risk. "
                         "Return control to @Arbiter.\n"
                         "HANDOFF: @Compliance | STATE: RECRUIT | REQUEST: compliance opinion",
@@ -212,7 +219,7 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
                 state,
                 tools,
                 "⚖️ ROUND 2: REBUTTAL\n"
-                f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance', 'advocate1'), max_words=110)}\n"
+                f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance', 'advocate1'))}\n"
                 "@Critic strengthen only the objections that remain unresolved. Do not repeat closed points. "
                 "Return control to @Arbiter.\n"
                 "HANDOFF: @Critic | STATE: ROUND_2 | REQUEST: unresolved objections",
@@ -225,7 +232,7 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
                 state,
                 tools,
                 "⚖️ ROUND 2: CLOSING\n"
-                f"{self._context_block(state, include=('research', 'scout', 'critic2', 'compliance'), max_words=110)}\n"
+                f"{self._context_block(state, include=('research', 'scout', 'critic2', 'compliance'))}\n"
                 "@Advocate give a concise closing statement. Address the remaining objections point by point "
                 "and state any purchase conditions. Return control to @Arbiter.\n"
                 "HANDOFF: @Advocate | STATE: ROUND_2 | REQUEST: final defense",
@@ -244,7 +251,7 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
             state,
             tools,
             "⚖️ ROUND 1: DEFENSE\n"
-            f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance'), max_words=115)}\n"
+            f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance'))}\n"
             "@Advocate answer the Critic point by point using room evidence only. "
             "Concede unsupported claims and propose concrete safeguards. Return control to @Arbiter.\n"
             "HANDOFF: @Advocate | STATE: ROUND_1 | REQUEST: point-by-point defense",
@@ -276,7 +283,7 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
     ) -> dict[str, Any]:
         hydrated_history = "\n".join(
             f"[{item.get('sender_name') or item.get('sender_type', 'Unknown')}]: "
-            f"{item.get('content', '')}"
+            f"{self._sanitize_mentions(str(item.get('content', '')))}"
             for item in history.raw[-30:]
         )
         transcript_parts = [hydrated_history, *state.transcript]
@@ -403,43 +410,28 @@ Transcript:
         )
         return target
 
-    @staticmethod
-    def _trim(value: str, limit: int) -> str:
-        value = " ".join(value.split())
-        return value if len(value) <= limit else value[: limit - 1] + "…"
-
-    @staticmethod
-    def _brief(value: str, max_words: int) -> str:
-        words = " ".join(value.split()).split()
-        if len(words) <= max_words:
-            return " ".join(words)
-        return " ".join(words[:max_words]) + "…"
-
-    @classmethod
-    def _snapshot(cls, value: str, max_urls: int = 0) -> str:
+    def _snapshot(self, value: str) -> str:
         lines = [
             line.strip()
             for line in value.splitlines()
             if line.strip() and not line.strip().startswith("HANDOFF:")
         ]
-        cleaned = " ".join(lines)
+        cleaned = self._sanitize_mentions("\n".join(lines))
         cleaned = re.sub(r"^[⚖️🔍✅❌🕵️🛡️]\s*", "", cleaned)
-        urls = list(dict.fromkeys(re.findall(r"https?://[^\s)\]>]+", cleaned)))
-        prose = re.sub(r"https?://[^\s)\]>]+", "", cleaned)
-        snapshot = cls._brief(prose, 120)
-        if max_urls and urls:
-            snapshot = f"{snapshot} SOURCES: {' '.join(urls[:max_urls])}"
-        return " ".join(snapshot.split())
+        return "\n".join(line.strip() for line in cleaned.splitlines() if line.strip())
 
-    @classmethod
-    def _cap_message(cls, content: str, max_words: int = 195) -> str:
+    @staticmethod
+    def _cap_message(content: str, max_words: int = EMERGENCY_WORD_LIMIT) -> str:
         lines = [line.strip() for line in content.splitlines() if line.strip()]
         handoff = next(
             (line for line in reversed(lines) if line.startswith("HANDOFF:")), ""
         )
         body_lines = [line for line in lines if not line.startswith("HANDOFF:")]
         reserved = len(handoff.split()) if handoff else 0
-        body = cls._brief(" ".join(body_lines), max(1, max_words - reserved))
+        body = truncate_at_sentence_boundary(
+            "\n".join(body_lines),
+            max(1, max_words - reserved),
+        )
         return f"{body}\n{handoff}".strip() if handoff else body
 
     async def _delegate(
@@ -454,22 +446,23 @@ Transcript:
         state.pending_mentions = list(mentions)
         await tools.send_message(message, mentions=mentions)
 
-    @classmethod
-    def _clean_case(cls, msg: PlatformMessage) -> str:
-        content = re.sub(
-            r"@\[\[[0-9a-fA-F-]{16,}\]\]",
-            cls._mention_for(msg),
-            msg.content,
-        )
+    def _clean_case(self, msg: PlatformMessage) -> str:
+        content = self._sanitize_mentions(msg.content)
         return " ".join(content.split())
 
-    @classmethod
+    def _sanitize_mentions(self, value: str) -> str:
+        def replace(match: re.Match[str]) -> str:
+            identifier = match.group(1).lower()
+            name = self.mention_names.get(identifier, "participant")
+            return name if name.startswith("@") else f"@{name}"
+
+        return re.sub(r"@\[\[([0-9a-fA-F-]{16,})\]\]", replace, value)
+
     def _context_block(
-        cls,
+        self,
         state: DebateState,
         *,
         include: tuple[str, ...],
-        max_words: int,
     ) -> str:
         labels = {
             "research": ("FACTS", state.research_evidence),
@@ -479,17 +472,16 @@ Transcript:
             "advocate1": ("ADVOCATE R1", state.advocate_round_1),
             "critic2": ("CRITIC R2", state.critic_round_2),
         }
-        parts = [f"CASE BRIEF: {cls._brief(state.case, 38)}"]
+        parts = [f"CASE BRIEF:\n{self._sanitize_mentions(state.case)}"]
         available = [
             (label, value) for key in include for label, value in [labels[key]] if value
         ]
         if available:
-            remaining = max(20, max_words - len(parts[0].split()) - len(available) * 2)
-            each = max(15, remaining // len(available))
-            digest = " | ".join(
-                f"{label}: {cls._brief(value, each)}" for label, value in available
+            digest = "\n\n".join(
+                f"{label}:\n{self._sanitize_mentions(value)}"
+                for label, value in available
             )
-            parts.append(f"EVIDENCE DIGEST: {digest}")
+            parts.append(f"EVIDENCE DIGEST:\n{digest}")
         for role in state.missing_agents:
             parts.append(f"GAP: {role} unavailable")
         return "\n".join(parts)
@@ -638,7 +630,7 @@ Transcript:
                 state,
                 tools,
                 "⚖️ RESEARCH TIMED OUT\n"
-                f"{self._context_block(state, include=(), max_words=100)}\n"
+                f"{self._context_block(state, include=())}\n"
                 "@Scout compare 2-3 alternatives using available room evidence.\n"
                 "HANDOFF: @Scout | STATE: SCOUTING | REQUEST: alternative comparison",
                 ["@Scout"],
@@ -649,7 +641,7 @@ Transcript:
                 state,
                 tools,
                 "⚖️ SCOUTING TIMED OUT\n"
-                f"{self._context_block(state, include=('research',), max_words=110)}\n"
+                f"{self._context_block(state, include=('research',))}\n"
                 "@Critic present the strongest evidence-based objections.\n"
                 "HANDOFF: @Critic | STATE: ROUND_1 | REQUEST: strongest objections",
                 ["@Critic"],
@@ -663,7 +655,7 @@ Transcript:
                 state,
                 tools,
                 "⚖️ DEFENSE TIMED OUT\n"
-                f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance'), max_words=110)}\n"
+                f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance'))}\n"
                 "@Critic identify only unresolved objections for the closing round.\n"
                 "HANDOFF: @Critic | STATE: ROUND_2 | REQUEST: unresolved objections",
                 ["@Critic"],
@@ -674,7 +666,7 @@ Transcript:
                 state,
                 tools,
                 "⚖️ REBUTTAL TIMED OUT\n"
-                f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance'), max_words=110)}\n"
+                f"{self._context_block(state, include=('research', 'scout', 'critic1', 'compliance'))}\n"
                 "@Advocate give the final defense and purchase conditions.\n"
                 "HANDOFF: @Advocate | STATE: ROUND_2 | REQUEST: final defense",
                 ["@Advocate"],
@@ -691,12 +683,14 @@ def build_arbiter_agent(
     credentials: AgentCredentials,
     settings: Settings,
     compliance_identifier: str = "Compliance",
+    mention_names: dict[str, str] | None = None,
 ) -> Agent:
     return Agent.create(
         adapter=ArbiterAdapter(
             make_llm("arbiter", settings),
             turn_timeout=settings.debate_turn_timeout,
             compliance_identifier=compliance_identifier,
+            mention_names=mention_names,
         ),
         agent_id=credentials.agent_id,
         api_key=credentials.api_key,
