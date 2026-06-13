@@ -3,7 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.common.config import load_settings
-from src.common.llm import ModelSpec, available_model_specs
+from src.common.llm import (
+    ModelSpec,
+    _build_model,
+    _temperature_for_role,
+    available_model_specs,
+)
 
 
 def test_v2_default_model_mapping(tmp_path: Path, monkeypatch) -> None:
@@ -51,3 +56,32 @@ def test_tool_roles_skip_featherless_fallback(tmp_path: Path, monkeypatch) -> No
         spec.provider != "featherless"
         for spec in available_model_specs("researcher", settings)
     )
+
+
+def test_debate_roles_use_zero_temperature(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_TEMPERATURE=0.2\n", encoding="utf-8")
+    settings = load_settings(env_path)
+    for role in ("advocate", "critic", "compliance"):
+        assert _temperature_for_role(role, settings) == 0.0
+    for role in ("arbiter", "researcher", "scout"):
+        assert _temperature_for_role(role, settings) == 0.2
+
+
+def test_arbiter_model_can_be_built_at_debate_temperature(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "AIML_API_KEY=test\nLLM_TEMPERATURE=0.2\n",
+        encoding="utf-8",
+    )
+    settings = load_settings(env_path)
+    monkeypatch.setenv("AIML_API_KEY", "test")
+    model = _build_model(
+        ModelSpec("aiml", "openai/gpt-4.1-mini"),
+        settings,
+        role="critic",
+    )
+    assert model.temperature == 0.0

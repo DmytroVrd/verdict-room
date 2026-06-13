@@ -18,6 +18,8 @@ from langchain_openai import ChatOpenAI
 
 from src.common.config import Settings, configured_provider_keys, load_settings
 
+DEBATE_ROLES = frozenset({"advocate", "critic", "compliance"})
+
 
 class LLMConfigurationError(RuntimeError):
     """Raised when no configured provider can serve a role."""
@@ -99,10 +101,19 @@ class ModelSpec:
         return cls(provider=provider.lower(), model=model)
 
 
-def _build_model(spec: ModelSpec, settings: Settings) -> BaseChatModel:
+def _temperature_for_role(role: str, settings: Settings) -> float:
+    return 0.0 if role in DEBATE_ROLES else settings.llm_temperature
+
+
+def _build_model(
+    spec: ModelSpec,
+    settings: Settings,
+    *,
+    role: str,
+) -> BaseChatModel:
     common: dict[str, Any] = {
         "model": spec.model,
-        "temperature": settings.llm_temperature,
+        "temperature": _temperature_for_role(role, settings),
         "timeout": settings.llm_timeout_seconds,
         "max_retries": 2,
     }
@@ -158,7 +169,12 @@ def available_model_specs(
     return result
 
 
-def make_llm(role: str, settings: Settings | None = None) -> BaseChatModel:
+def make_llm(
+    role: str,
+    settings: Settings | None = None,
+    *,
+    temperature_role: str | None = None,
+) -> BaseChatModel:
     settings = settings or load_settings()
     specs = available_model_specs(role, settings)
     if not specs:
@@ -166,5 +182,7 @@ def make_llm(role: str, settings: Settings | None = None) -> BaseChatModel:
         raise LLMConfigurationError(
             f"No provider key is configured for role '{role}' ({requested})."
         )
-    models = [_build_model(spec, settings) for spec in specs]
+    models = [
+        _build_model(spec, settings, role=temperature_role or role) for spec in specs
+    ]
     return models[0] if len(models) == 1 else FallbackChatModel(candidates=models)

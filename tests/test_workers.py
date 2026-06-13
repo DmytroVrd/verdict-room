@@ -9,7 +9,15 @@ from langchain_core.language_models import FakeListChatModel
 from langchain_core.messages import AIMessage
 
 from src.agents.base import EMERGENCY_WORD_LIMIT, ReliableLangGraphAdapter, load_prompt
-from src.agents.workers import TextWorkerAdapter
+from src.agents.workers import (
+    DEBATE_EVIDENCE_OUTPUT_CONTRACT,
+    DEBATE_REVIEW_CONTRACT,
+    GroundedCondition,
+    GroundedDebateResponse,
+    GroundedEvidence,
+    GroundedHypothesis,
+    TextWorkerAdapter,
+)
 
 
 class FakeTools:
@@ -20,6 +28,16 @@ class FakeTools:
         self, content: str, mentions: list[str] | None = None
     ) -> None:
         self.messages.append((content, mentions))
+
+
+class FakeGroundedLLM:
+    def __init__(self, response: GroundedDebateResponse) -> None:
+        self.response = response
+        self.prompts: list[str] = []
+
+    async def ainvoke(self, prompt: str) -> GroundedDebateResponse:
+        self.prompts.append(prompt)
+        return self.response
 
 
 def message(sender: str, content: str) -> PlatformMessage:
@@ -44,7 +62,18 @@ async def test_text_worker_sends_response_with_arbiter_mention() -> None:
     )
     adapter = TextWorkerAdapter(
         role="advocate",
-        llm=FakeListChatModel(responses=[f"✅ Defense complete.\n{handoff}"]),
+        llm=FakeListChatModel(responses=["unused"]),
+        grounded_llm=FakeGroundedLLM(
+            GroundedDebateResponse(
+                compliance_concern=False,
+                evidence_primary=GroundedEvidence(quote="Supported source text."),
+                evidence_secondary=GroundedEvidence(quote="Second source text."),
+                evidence_tertiary=GroundedEvidence(quote="Third source text."),
+                hypothesis_primary=GroundedHypothesis(area="cost"),
+                hypothesis_secondary=GroundedHypothesis(area="migration"),
+                condition=GroundedCondition(area="security"),
+            )
+        ),
         instructions="Be concise.",
     )
     tools = FakeTools()
@@ -58,8 +87,67 @@ async def test_text_worker_sends_response_with_arbiter_mention() -> None:
         room_id="room-1",
     )
     assert tools.messages == [
-        (f"✅ Defense complete.\n\n{handoff}", ["@Arbiter"])
+        (
+            "✅\n"
+            '- EVIDENCE | (evidence: "Supported source text.")\n'
+            '- EVIDENCE | (evidence: "Second source text.")\n'
+            '- EVIDENCE | (evidence: "Third source text.")\n'
+            "- HYPOTHESIS | QUESTION: Could the documented pricing create "
+            "budget pressure? | CHECK: Compare equivalent vendor quotes and "
+            "contract terms.\n"
+            "- HYPOTHESIS | QUESTION: Might migration affect continuity or data "
+            "quality? | CHECK: Run a representative import and export pilot.\n"
+            "- CONDITION | CHECK: Map documented controls to the buyer security "
+            "requirements.\n\n"
+            f"{handoff}",
+            ["@Arbiter"],
+        )
     ]
+
+
+def test_grounded_render_keeps_complete_items_without_censoring() -> None:
+    adapter = TextWorkerAdapter(
+        role="critic",
+        llm=FakeListChatModel(responses=["unused"]),
+        instructions="Be concise.",
+    )
+    response = GroundedDebateResponse(
+        compliance_concern=True,
+        evidence_primary=GroundedEvidence(quote="Business: $20/user/month"),
+        evidence_secondary=GroundedEvidence(quote="A second exact fact."),
+        evidence_tertiary=GroundedEvidence(quote="A third exact fact."),
+        hypothesis_primary=GroundedHypothesis(area="cost"),
+        hypothesis_secondary=GroundedHypothesis(area="migration"),
+        condition=GroundedCondition(area="security"),
+    )
+    rendered = adapter._render_grounded(response)
+    assert '$20/user/month")' in rendered
+    assert "Could the documented pricing create budget pressure?" in rendered
+    assert "🚨 COMPLIANCE CONCERN" in rendered
+    assert "DATA UNAVAILABLE" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("role", "case_text", "state"),
+    [
+        ("critic", "ROUND 1: CHALLENGE", "ROUND_1_CRITIC_COMPLETE"),
+        ("critic", "ROUND 2: REBUTTAL", "ROUND_2_CRITIC_COMPLETE"),
+        ("advocate", "ROUND 1: DEFENSE", "ROUND_1_ADVOCATE_COMPLETE"),
+        ("advocate", "ROUND 2: CLOSING", "ROUND_2_ADVOCATE_COMPLETE"),
+        ("compliance", "SPECIALIST REVIEW", "COMPLIANCE_COMPLETE"),
+    ],
+)
+def test_grounded_handoff_matches_role_and_round(
+    role: str,
+    case_text: str,
+    state: str,
+) -> None:
+    adapter = TextWorkerAdapter(
+        role=role,
+        llm=FakeListChatModel(responses=["unused"]),
+        instructions="Be concise.",
+    )
+    assert state in adapter._handoff_for_request(case_text)
 
 
 def test_reliable_adapter_does_not_truncate_normal_scout_response() -> None:
@@ -166,151 +254,42 @@ def test_debate_prompts_forbid_unsupported_facts(role: str) -> None:
     assert "Data unavailable in CASE BRIEF / EVIDENCE DIGEST." in prompt
     assert "HYPOTHESIS" in prompt
     assert "Never invent" in prompt
+    assert '(evidence: "...")' in prompt
+    assert "exact quote" in prompt
 
 
-def test_advocate_omits_unsupported_calculations_and_pilot_size() -> None:
-    adapter = TextWorkerAdapter(
-        role="advocate",
-        llm=FakeListChatModel(responses=["unused"]),
-        instructions="Be concise.",
-    )
-    evidence = (
-        "CASE BRIEF: 50-person company.\n"
-        "EVIDENCE DIGEST: Notion costs $20/user/month."
-    )
-    response = (
-        "✅ EVIDENCE: Notion costs $20/user/month.\n"
-        "- Derived annual cost is $12,000.\n"
-        "- Pilot with 5-10 people for one billing cycle.\n"
-        "HANDOFF: @Arbiter | STATE: ROUND_1_ADVOCATE_COMPLETE | REQUEST: continue"
-    )
-    cleaned = adapter._remove_unsupported_numeric_claims(response, evidence)
-    assert "$20/user/month" in cleaned
-    assert "$12,000" not in cleaned
-    assert "5-10 people" not in cleaned
-    assert "one billing cycle" not in cleaned
-    assert cleaned.count("DATA UNAVAILABLE") == 1
-    assert "HANDOFF: @Arbiter" in cleaned
+@pytest.mark.parametrize("role", ["advocate", "critic"])
+def test_debate_prompts_require_qualitative_fallback_for_missing_numbers(
+    role: str,
+) -> None:
+    prompt = load_prompt(role)
+    assert "qualitative wording" in prompt
+    assert "Never derive annual totals from monthly prices" in prompt
+    assert "Never infer that an omitted integration" in prompt
+    assert "`lacks`, `without`, `does not have`" in prompt
+    assert "Do not name a certification containing a number" in prompt
+    assert "Do not repeat buyer headcount" in prompt
+    assert "verbatim digest substring" in prompt
+    assert "Never normalize `user` to `member`" in prompt
 
 
-def test_advocate_omits_hyphenated_unsupported_duration() -> None:
-    adapter = TextWorkerAdapter(
-        role="advocate",
-        llm=FakeListChatModel(responses=["unused"]),
-        instructions="Be concise.",
+def test_final_debate_output_contract_repeats_critical_rules_near_request() -> None:
+    assert "Do not repeat the buyer headcount" in DEBATE_EVIDENCE_OUTPUT_CONTRACT
+    assert "(evidence:" in DEBATE_EVIDENCE_OUTPUT_CONTRACT
+    assert "never from DEBATE CONTEXT" in DEBATE_EVIDENCE_OUTPUT_CONTRACT
+    assert "certification name containing a number" in (
+        DEBATE_EVIDENCE_OUTPUT_CONTRACT
     )
-    cleaned = adapter._remove_unsupported_numeric_claims(
-        "✅ Run a 3-month trial.\nHANDOFF: @Arbiter | STATE: DONE | REQUEST: next",
-        "CASE BRIEF: 50-person team. EVIDENCE DIGEST: Business plan is monthly.",
-    )
-    assert "3-month" not in cleaned
-    assert "Run a trial." in cleaned
+    assert "Never use `...` or an ellipsis" in DEBATE_EVIDENCE_OUTPUT_CONTRACT
 
 
-def test_advocate_scrubs_prescriptive_numbers_even_when_token_exists_elsewhere() -> None:
-    adapter = TextWorkerAdapter(
-        role="advocate",
-        llm=FakeListChatModel(responses=["unused"]),
-        instructions="Be concise.",
-    )
-    cleaned = adapter._remove_unsupported_numeric_claims(
-        (
-            "Conduct a fixed-price pilot for 10 users to validate feature fit.\n"
-            "Perform a controlled migration test for one team to assess disruption."
-        ),
-        (
-            "CASE BRIEF: 50-person company.\n"
-            "EVIDENCE DIGEST: The free plan supports up to 10 users."
-        ),
-    )
-    assert "10 users" not in cleaned
-    assert "one team" not in cleaned
-    assert "Conduct a fixed-price pilot to validate feature fit." in cleaned
-    assert "Perform a controlled migration test to assess disruption." in cleaned
-
-
-def test_advocate_keeps_case_size_when_pilot_appears_later_in_same_line() -> None:
-    adapter = TextWorkerAdapter(
-        role="advocate",
-        llm=FakeListChatModel(responses=["unused"]),
-        instructions="Be concise.",
-    )
-    response = (
-        "For a 50-person company, the risks define due diligence: "
-        "a pilot for workflow fit."
-    )
-    assert (
-        adapter._remove_unsupported_numeric_claims(
-            response,
-            "CASE BRIEF: A 50-person company.",
-        )
-        == response
-    )
-
-
-def test_critic_omits_export_claim_contradicted_by_evidence() -> None:
-    adapter = TextWorkerAdapter(
-        role="critic",
-        llm=FakeListChatModel(responses=["unused"]),
-        instructions="Be concise.",
-    )
-    cleaned = adapter._remove_unsupported_numeric_claims(
-        "EVIDENCE: Notion export is limited to markdown.",
-        "EVIDENCE DIGEST: Notion exports to markdown, HTML, CSV, and PDF.",
-    )
-    assert "limited to markdown" not in cleaned
-    assert "DATA UNAVAILABLE" in cleaned
-
-
-def test_debate_claim_does_not_become_authoritative_by_repetition() -> None:
-    adapter = TextWorkerAdapter(
-        role="critic",
-        llm=FakeListChatModel(responses=["unused"]),
-        instructions="Be concise.",
-    )
-    cleaned = adapter._remove_unsupported_numeric_claims(
-        "EVIDENCE: Notion export is limited to markdown.",
-        (
-            "CASE BRIEF:\nCompare workspace tools.\n"
-            "EVIDENCE DIGEST:\n"
-            "ADVOCATE R1:\nNotion export is limited to markdown.\n"
-            "FACTS:\nNotion exports to markdown, HTML, CSV, and PDF."
-        ),
-    )
-    assert "limited to markdown" not in cleaned
-    assert "DATA UNAVAILABLE" in cleaned
-
-
-def test_critic_omits_unsupported_certification_absence() -> None:
-    adapter = TextWorkerAdapter(
-        role="critic",
-        llm=FakeListChatModel(responses=["unused"]),
-        instructions="Be concise.",
-    )
-    cleaned = adapter._remove_unsupported_numeric_claims(
-        (
-            "Notion lacks explicit certifications like SOC 2, which Slite holds.\n"
-            "HANDOFF: @Arbiter | STATE: DONE | REQUEST: next"
-        ),
-        "EVIDENCE DIGEST: Slite has SOC 2. Notion certification data is unavailable.",
-    )
-    assert "Notion lacks" not in cleaned
-    assert "DATA UNAVAILABLE" in cleaned
-    assert "HANDOFF: @Arbiter" in cleaned
-
-
-def test_critic_keeps_structural_and_supported_numbers() -> None:
-    adapter = TextWorkerAdapter(
-        role="critic",
-        llm=FakeListChatModel(responses=["unused"]),
-        instructions="Be concise.",
-    )
-    evidence = "CASE BRIEF: 50-person team. EVIDENCE DIGEST: SOC 2."
-    response = (
-        "❌ Top 3 risks for 50 users.\n"
-        "1. SOC 2/HIPAA is documented for the alternative."
-    )
-    assert adapter._remove_unsupported_numeric_claims(response, evidence) == response
+def test_debate_review_contract_uses_prompt_review_not_code_censor() -> None:
+    assert "STRUCTURED FINAL FORMAT" in DEBATE_REVIEW_CONTRACT
+    assert "only inside" in DEBATE_REVIEW_CONTRACT
+    assert "one exact contiguous source line substring" in DEBATE_REVIEW_CONTRACT
+    assert "Omission is not evidence" in DEBATE_REVIEW_CONTRACT
+    assert "Never assert a new product fact" in DEBATE_REVIEW_CONTRACT
+    assert "Use no facts from DEBATE CONTEXT" in DEBATE_REVIEW_CONTRACT
 
 
 @pytest.mark.asyncio

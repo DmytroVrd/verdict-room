@@ -7,20 +7,130 @@ import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from band import Agent
 from band.core.protocols import AgentToolsProtocol
 from band.core.simple_adapter import SimpleAdapter
 from band.core.types import HistoryProvider, PlatformMessage
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.runnables import Runnable
+from pydantic import BaseModel, Field
 
 from src.agents.base import EMERGENCY_WORD_LIMIT, truncate_at_sentence_boundary
-from src.agents.workers import remove_unsupported_numeric_claims
 from src.common.config import PROJECT_ROOT, AgentCredentials, Settings
 from src.common.llm import make_llm
 
 logger = logging.getLogger("ARBITER")
+VerdictRiskArea = Literal[
+    "cost",
+    "migration",
+    "security",
+    "privacy",
+    "capability",
+    "alternatives",
+]
+
+VERDICT_RISK_QUESTIONS = {
+    "cost": "Could the documented pricing create budget pressure?",
+    "migration": "Might migration affect continuity or data quality?",
+    "security": "Could the documented controls leave a buyer requirement unresolved?",
+    "privacy": "Might the documented privacy terms leave a buyer requirement unresolved?",
+    "capability": "Could the documented capabilities miss an important buyer workflow?",
+    "alternatives": "Might an alternative provide a better documented fit?",
+}
+
+VERDICT_CHECKS = {
+    "cost": "Compare equivalent vendor quotes and contract terms.",
+    "migration": "Run a representative import and export pilot.",
+    "security": "Map documented controls to the buyer security requirements.",
+    "privacy": "Review the privacy agreement, data flows, and subprocessors.",
+    "capability": "Test the critical buyer workflows in a pilot.",
+    "alternatives": "Compare equivalent capabilities and contract terms.",
+}
+
+ARBITER_EVIDENCE_CONTRACT = """
+Use only facts and numbers present in the transcript. Do not calculate new
+totals, infer that a missing certification is absent, or turn an evidence gap
+into a negative fact. When evidence is missing, describe it as unknown.
+Do not repeat the buyer headcount in rationale, conditions, or dissent.
+Treat a list of documented features as proof only of those listed features;
+never infer that an omitted feature, integration, control, or certification is
+absent. Use `lacks`, `without`, `does not have`, `only`, `limited to`, or
+equivalent limitation wording only when authoritative evidence explicitly
+states that same negative fact. Do not name a numbered certification unless
+its exact name appears in authoritative evidence and is cited; otherwise use
+the generic phrase `certification documentation`.
+Every factual number, price, percentage, duration, or quantity in rationale,
+conditions, or dissent must include a short exact evidence quote in the same
+string using `(evidence: "...")`. If no exact quote exists, use qualitative
+wording without a number. Scores and total are exempt from this citation format.
+Every evidence quote must be one character-for-character contiguous substring
+of the authoritative CASE BRIEF or EVIDENCE DIGEST, not another agent's
+argument. If exact copying is uncertain, omit the quote and express the point
+qualitatively or as unknown.
+""".strip()
+
+ARBITER_REVIEW_CONTRACT = """
+You are the final evidence editor for a purchase verdict. Return ONLY one
+complete valid JSON object matching the draft schema.
+
+Silently verify every rationale, condition, and dissent string:
+- Do not repeat the buyer headcount or other case quantities.
+- Do not calculate or derive any new quantity.
+- Every remaining factual quantity must have an immediate `(evidence: "...")`
+  quote copied character-for-character from AUTHORITATIVE EVIDENCE.
+- Every evidence quote must be one contiguous substring. Never use `...` or an
+  ellipsis to combine source fragments, and never cite debate arguments.
+- A feature list proves only the listed features. Do not infer absence from
+  omission.
+- Use negative limitation wording only when AUTHORITATIVE EVIDENCE explicitly
+  states that same negative fact.
+- Delete unsupported certification names containing numbers and use the generic
+  phrase `certification documentation`.
+- When support is missing, write the point qualitatively or as unknown.
+
+Preserve supported reasoning and the draft's score values. Return no markdown
+fence and no commentary.
+""".strip()
+
+
+class VerdictEvidence(BaseModel):
+    quote: str = Field(
+        description=(
+            "One exact contiguous source-line substring copied from CASE BRIEF "
+            "or EVIDENCE DIGEST. Do not prepend a heading or product name from "
+            "another line, combine lines, add markdown, or use an ellipsis."
+        )
+    )
+
+
+class VerdictCheck(BaseModel):
+    area: VerdictRiskArea = Field(
+        description=(
+            "Choose the category for a purchase verification step. Do not "
+            "generate free-form condition prose."
+        )
+    )
+
+
+class GroundedVerdictResponse(BaseModel):
+    value_for_money: int = Field(ge=0, le=25)
+    capability_fit: int = Field(ge=0, le=25)
+    risk_profile: int = Field(ge=0, le=25)
+    alternatives: int = Field(ge=0, le=25)
+    recommendation: Literal["BUY", "BUY_WITH_CONDITIONS", "AVOID"]
+    rationale_primary: VerdictEvidence
+    rationale_secondary: VerdictEvidence
+    rationale_tertiary: VerdictEvidence
+    condition_primary: VerdictCheck
+    condition_secondary: VerdictCheck
+    dissent_area: VerdictRiskArea = Field(
+        description=(
+            "Choose the category for the strongest opposing buyer-risk question. "
+            "Do not generate free-form dissent prose."
+        )
+    )
 
 
 class DebatePhase(StrEnum):
@@ -61,11 +171,13 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
         turn_timeout: float | None = None,
         compliance_identifier: str = "Compliance",
         mention_names: dict[str, str] | None = None,
+        verdict_llm: Runnable[Any, GroundedVerdictResponse] | None = None,
     ) -> None:
         super().__init__()
         self.llm = llm
         self.turn_timeout = turn_timeout
         self.compliance_identifier = compliance_identifier
+        self.verdict_llm = verdict_llm
         self.mention_names = {
             identifier.lower(): name
             for identifier, name in (mention_names or {}).items()
@@ -282,6 +394,9 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
         msg: PlatformMessage,
         history: HistoryProvider,
     ) -> dict[str, Any]:
+        if self.verdict_llm is not None:
+            return await self._make_grounded_verdict(state)
+
         hydrated_history = "\n".join(
             f"[{item.get('sender_name') or item.get('sender_type', 'Unknown')}]: "
             f"{self._sanitize_mentions(str(item.get('content', '')))}"
@@ -294,9 +409,7 @@ You are the neutral Arbiter. Produce ONLY valid JSON for the purchase case below
 Scores are integers 0-25 and total must equal their sum.
 recommendation must be BUY, BUY_WITH_CONDITIONS, or AVOID.
 Keep rationale to 3-5 short strings and dissent to one strong opposing argument.
-Use only facts and numbers present in the transcript. Do not calculate new
-totals, infer that a missing certification is absent, or turn an evidence gap
-into a negative fact. When evidence is missing, describe it as unknown.
+{ARBITER_EVIDENCE_CONTRACT}
 
 Schema:
 {{
@@ -325,18 +438,40 @@ Transcript:
             if isinstance(response.content, str)
             else str(response.content)
         )
+        authoritative = self._context_block(
+            state,
+            include=("research", "scout", "compliance"),
+        )
+        review = await self.llm.ainvoke(
+            f"{ARBITER_REVIEW_CONTRACT}\n\n"
+            f"AUTHORITATIVE EVIDENCE:\n{authoritative}\n\n"
+            f"DRAFT JSON:\n{text}\n\n"
+            "FINAL MANDATORY CHECK BEFORE OUTPUT: Return the complete corrected "
+            "JSON now. Remove buyer headcount, derived quantities, non-contiguous "
+            "or paraphrased evidence quotes, absence claims inferred from "
+            "omission, and unsupported certification names containing numbers."
+        )
+        reviewed_text = (
+            review.content
+            if isinstance(review.content, str)
+            else str(review.content)
+        ).strip()
         try:
-            verdict = json.loads(self._extract_json(text))
+            verdict = json.loads(self._extract_json(reviewed_text or text))
             verdict = self._normalize_verdict(verdict, state)
-            verdict = self._ground_verdict(
-                verdict,
-                self._context_block(state, include=("research", "scout")),
-            )
             verdict["compliance_reviewed"] = state.compliance_reviewed
             verdict["evidence_gaps"] = state.missing_agents
             return verdict
         except Exception:
-            logger.exception("Invalid verdict JSON; using safe fallback")
+            logger.exception("Invalid reviewed verdict JSON; trying the draft")
+            try:
+                verdict = json.loads(self._extract_json(text))
+                verdict = self._normalize_verdict(verdict, state)
+                verdict["compliance_reviewed"] = state.compliance_reviewed
+                verdict["evidence_gaps"] = state.missing_agents
+                return verdict
+            except Exception:
+                logger.exception("Invalid draft verdict JSON; using safe fallback")
             return {
                 "case": state.case,
                 "scores": {
@@ -355,6 +490,63 @@ Transcript:
                 "compliance_reviewed": state.compliance_reviewed,
                 "evidence_gaps": state.missing_agents,
             }
+
+    async def _make_grounded_verdict(
+        self,
+        state: DebateState,
+    ) -> dict[str, Any]:
+        authoritative = self._context_block(
+            state,
+            include=("research", "scout", "compliance"),
+        )
+        debate = self._context_block(
+            state,
+            include=("critic1", "advocate1", "critic2"),
+        )
+        response = await self.verdict_llm.ainvoke(
+            "Create the final structured purchase verdict.\n"
+            "- Use DEBATE CONTEXT only to choose scores and recommendation.\n"
+            "- Put every factual digit, price, percentage, duration, or quantity "
+            "only inside a rationale quote.\n"
+            "- Each rationale quote must be one exact contiguous source-line "
+            "substring from CASE BRIEF or EVIDENCE DIGEST. Do not prepend a "
+            "product name or heading from another line, combine lines, add "
+            "markdown, or use an ellipsis.\n"
+            "- Use an absence quote only when it explicitly states the absence "
+            "or evidence gap. Omission is not evidence.\n"
+            "- Conditions are checks with no predicted result.\n"
+            "- Dissent is an uncertain buyer-risk question, not a product fact.\n\n"
+            f"AUTHORITATIVE EVIDENCE:\n{authoritative}\n\n"
+            f"DEBATE CONTEXT FOR SCORING ONLY:\n{debate}"
+        )
+        scores = {
+            "value_for_money": response.value_for_money,
+            "capability_fit": response.capability_fit,
+            "risk_profile": response.risk_profile,
+            "alternatives": response.alternatives,
+        }
+        rationale = [
+            f'Evidence: (evidence: "{item.quote}")'
+            for item in (
+                response.rationale_primary,
+                response.rationale_secondary,
+                response.rationale_tertiary,
+            )
+        ]
+        return {
+            "case": state.case,
+            "scores": scores,
+            "total": sum(scores.values()),
+            "recommendation": response.recommendation,
+            "rationale": rationale,
+            "conditions": [
+                VERDICT_CHECKS[response.condition_primary.area],
+                VERDICT_CHECKS[response.condition_secondary.area],
+            ],
+            "dissent": VERDICT_RISK_QUESTIONS[response.dissent_area],
+            "compliance_reviewed": state.compliance_reviewed,
+            "evidence_gaps": list(state.missing_agents),
+        }
 
     @staticmethod
     def _extract_json(text: str) -> str:
@@ -408,48 +600,6 @@ Transcript:
             "evidence_gaps": list(state.missing_agents),
         }
 
-    @classmethod
-    def _ground_verdict(
-        cls,
-        verdict: dict[str, Any],
-        transcript: str,
-    ) -> dict[str, Any]:
-        def grounded(value: str) -> str:
-            if re.search(
-                r"(?:"
-                r"\b(?:lacks?|without|no)\b.{0,100}"
-                r"\b(?:soc\s*2|iso\s*27001|certification|audit report)"
-                r"|"
-                r"\b(?:soc\s*2|iso\s*27001|certifications?|audit reports?)\b"
-                r".{0,120}\b(?:but\s+)?not\s+(?:in|for|on)\b"
-                r")",
-                value,
-                re.IGNORECASE,
-            ):
-                return (
-                    "Independent certification evidence for the evaluated product "
-                    "is unavailable in the debate record."
-                )
-            cleaned, unsupported = remove_unsupported_numeric_claims(
-                value,
-                transcript,
-            )
-            if unsupported:
-                cleaned = cleaned.replace(
-                    "- DATA UNAVAILABLE: ",
-                    "Data unavailable: ",
-                )
-            return cleaned.strip() or "Data unavailable in the debate record."
-
-        verdict["rationale"] = [
-            grounded(str(item)) for item in verdict.get("rationale", [])
-        ]
-        verdict["conditions"] = [
-            grounded(str(item)) for item in verdict.get("conditions", [])
-        ]
-        verdict["dissent"] = grounded(str(verdict.get("dissent", "")))
-        return verdict
-
     @staticmethod
     def _save_verdict(room_id: str, verdict: dict[str, Any]) -> Path:
         target_dir = PROJECT_ROOT / "data" / "verdicts"
@@ -477,12 +627,19 @@ Transcript:
             (line for line in reversed(lines) if line.startswith("HANDOFF:")), ""
         )
         body_lines = [line for line in lines if not line.startswith("HANDOFF:")]
-        reserved = len(handoff.split()) if handoff else 0
+        directive = next(
+            (line for line in reversed(body_lines) if line.startswith("@")),
+            "",
+        )
+        if directive:
+            body_lines.remove(directive)
+        reserved = len(handoff.split()) + len(directive.split())
         body = truncate_at_sentence_boundary(
             "\n".join(body_lines),
             max(1, max_words - reserved),
         )
-        return f"{body}\n{handoff}".strip() if handoff else body
+        ending = "\n".join(line for line in (directive, handoff) if line)
+        return f"{body}\n{ending}".strip() if ending else body
 
     async def _delegate(
         self,
@@ -515,23 +672,36 @@ Transcript:
         include: tuple[str, ...],
     ) -> str:
         labels = {
-            "research": ("FACTS", state.research_evidence),
-            "scout": ("ALTERNATIVES", state.scout_evidence),
-            "critic1": ("CRITIC R1", state.critic_round_1),
-            "compliance": ("COMPLIANCE", state.compliance_evidence),
-            "advocate1": ("ADVOCATE R1", state.advocate_round_1),
-            "critic2": ("CRITIC R2", state.critic_round_2),
+            "research": ("evidence", "FACTS", state.research_evidence),
+            "scout": ("evidence", "ALTERNATIVES", state.scout_evidence),
+            "critic1": ("debate", "CRITIC R1", state.critic_round_1),
+            "compliance": ("evidence", "COMPLIANCE", state.compliance_evidence),
+            "advocate1": ("debate", "ADVOCATE R1", state.advocate_round_1),
+            "critic2": ("debate", "CRITIC R2", state.critic_round_2),
         }
         parts = [f"CASE BRIEF:\n{self._sanitize_mentions(state.case)}"]
         available = [
-            (label, value) for key in include for label, value in [labels[key]] if value
+            (kind, label, value)
+            for key in include
+            for kind, label, value in [labels[key]]
+            if value
         ]
-        if available:
+        debate = [(label, value) for kind, label, value in available if kind == "debate"]
+        evidence = [
+            (label, value) for kind, label, value in available if kind == "evidence"
+        ]
+        if evidence:
             digest = "\n\n".join(
                 f"{label}:\n{self._sanitize_mentions(value)}"
-                for label, value in available
+                for label, value in evidence
             )
             parts.append(f"EVIDENCE DIGEST:\n{digest}")
+        if debate:
+            context = "\n\n".join(
+                f"{label}:\n{self._sanitize_mentions(value)}"
+                for label, value in debate
+            )
+            parts.append(f"DEBATE CONTEXT (ARGUMENTS, NOT EVIDENCE):\n{context}")
         for role in state.missing_agents:
             parts.append(f"GAP: {role} unavailable")
         return "\n".join(parts)
@@ -735,12 +905,18 @@ def build_arbiter_agent(
     compliance_identifier: str = "Compliance",
     mention_names: dict[str, str] | None = None,
 ) -> Agent:
+    llm = make_llm("arbiter", settings)
     return Agent.create(
         adapter=ArbiterAdapter(
-            make_llm("arbiter", settings),
+            llm,
             turn_timeout=settings.debate_turn_timeout,
             compliance_identifier=compliance_identifier,
             mention_names=mention_names,
+            verdict_llm=llm.with_structured_output(
+                GroundedVerdictResponse,
+                method="function_calling",
+                strict=True,
+            ),
         ),
         agent_id=credentials.agent_id,
         api_key=credentials.api_key,

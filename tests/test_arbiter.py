@@ -9,7 +9,13 @@ import pytest
 from band.core.types import HistoryProvider, PlatformMessage
 from langchain_core.language_models import FakeListChatModel
 
-from src.agents.arbiter import ArbiterAdapter, DebatePhase, DebateState
+from src.agents.arbiter import (
+    ARBITER_EVIDENCE_CONTRACT,
+    ARBITER_REVIEW_CONTRACT,
+    ArbiterAdapter,
+    DebatePhase,
+    DebateState,
+)
 
 
 def test_extract_json_from_fence() -> None:
@@ -311,13 +317,15 @@ def test_cap_message_emergency_guard_ends_at_sentence_boundary() -> None:
     content = (
         "ROUND\n"
         + " ".join(["Evidence is complete."] * 350)
+        + "\n@Critic identify unresolved objections."
         + "\nHANDOFF: @Critic | STATE: ROUND_1 | REQUEST: objections"
     )
     capped = ArbiterAdapter._cap_message(content)
-    body, handoff = capped.rsplit("\n", 1)
+    body, directive, handoff = capped.rsplit("\n", 2)
     assert body.endswith(".")
     assert len(capped.split()) <= 600
     assert capped.count("HANDOFF:") == 1
+    assert directive == "@Critic identify unresolved objections."
     assert handoff == "HANDOFF: @Critic | STATE: ROUND_1 | REQUEST: objections"
 
 
@@ -350,30 +358,33 @@ def test_context_block_preserves_complete_evidence_without_ellipsis() -> None:
     assert "EVIDENCE DIGEST:\nFACTS:\n" in block
 
 
-def test_ground_verdict_removes_unsupported_duration_and_absence_claim() -> None:
-    verdict = {
-        "rationale": [
-            "Notion lacks SOC 2 certification unlike Slite.",
-            "SOC 2 and HIPAA are present in Slite but not in Notion.",
-            "Notion Business costs $20 per user.",
-        ],
-        "conditions": [
-            "Run a 3-month trial.",
-            "Conduct a fixed-price pilot for 10 users.",
-        ],
-        "dissent": "No audit report proves the control environment.",
-    }
-    grounded = ArbiterAdapter._ground_verdict(
-        verdict,
-        "EVIDENCE: Notion Business costs $20 per user. Slite has SOC 2.",
+def test_context_block_separates_debate_arguments_from_evidence() -> None:
+    adapter = ArbiterAdapter(FakeListChatModel(responses=["unused"]))
+    state = DebateState(
+        case="A purchase case.",
+        research_evidence="A sourced fact.",
+        critic_round_1="An objection.",
+        advocate_round_1="A rebuttal.",
     )
-    assert grounded["rationale"][0].startswith(
-        "Independent certification evidence"
+    block = adapter._context_block(
+        state,
+        include=("advocate1", "critic1", "research"),
     )
-    assert grounded["rationale"][1].startswith(
-        "Independent certification evidence"
+    assert (
+        "DEBATE CONTEXT (ARGUMENTS, NOT EVIDENCE):\n"
+        "ADVOCATE R1:\nA rebuttal.\n\nCRITIC R1:\nAn objection."
+    ) in block
+    assert "EVIDENCE DIGEST:\nFACTS:\nA sourced fact." in block
+    assert block.index("EVIDENCE DIGEST:") < block.index("DEBATE CONTEXT")
+
+
+def test_verdict_prompt_forbids_absence_inference_and_buyer_headcount() -> None:
+    assert "Do not repeat the buyer headcount" in ARBITER_EVIDENCE_CONTRACT
+    assert "never infer that an omitted feature" in ARBITER_EVIDENCE_CONTRACT
+    assert "`lacks`, `without`, `does not have`" in ARBITER_EVIDENCE_CONTRACT
+    assert "Do not name a numbered certification" in ARBITER_EVIDENCE_CONTRACT
+    assert "character-for-character contiguous substring" in (
+        ARBITER_EVIDENCE_CONTRACT
     )
-    assert grounded["rationale"][2] == "Notion Business costs $20 per user."
-    assert "3-month" not in grounded["conditions"][0]
-    assert "10 users" not in grounded["conditions"][1]
-    assert grounded["dissent"].startswith("Independent certification evidence")
+    assert "Do not repeat the buyer headcount" in ARBITER_REVIEW_CONTRACT
+    assert "Never use `...` or an" in ARBITER_REVIEW_CONTRACT
