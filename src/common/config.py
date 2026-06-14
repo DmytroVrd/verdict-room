@@ -20,7 +20,6 @@ DEFAULT_MODELS = {
 DEFAULT_FALLBACK_MODELS = (
     "aiml:openai/gpt-4.1-mini",
     "featherless:deepseek-ai/DeepSeek-V3.2",
-    "groq:openai/gpt-oss-120b",
 )
 
 
@@ -99,9 +98,6 @@ def load_agent_credentials(
 
 def configured_provider_keys() -> dict[str, bool]:
     return {
-        "groq": bool(os.getenv("GROQ_API_KEY")),
-        "gemini": bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")),
-        "openrouter": bool(os.getenv("OPENROUTER_API_KEY")),
         "aiml": bool(os.getenv("AIML_API_KEY")),
         "featherless": bool(os.getenv("FEATHERLESS_API_KEY")),
     }

@@ -12,8 +12,6 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 
 from src.common.config import Settings, configured_provider_keys, load_settings
@@ -117,23 +115,6 @@ def _build_model(
         "timeout": settings.llm_timeout_seconds,
         "max_retries": 2,
     }
-    if spec.provider == "groq":
-        return ChatGroq(api_key=os.environ["GROQ_API_KEY"], **common)
-    if spec.provider == "gemini":
-        key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        if not key:
-            raise KeyError("GOOGLE_API_KEY")
-        return ChatGoogleGenerativeAI(google_api_key=key, **common)
-    if spec.provider == "openrouter":
-        return ChatOpenAI(
-            api_key=os.environ["OPENROUTER_API_KEY"],
-            base_url="https://openrouter.ai/api/v1",
-            default_headers={
-                "HTTP-Referer": "https://github.com/",
-                "X-Title": "Verdict Room",
-            },
-            **common,
-        )
     if spec.provider == "aiml":
         return ChatOpenAI(
             api_key=os.environ["AIML_API_KEY"],

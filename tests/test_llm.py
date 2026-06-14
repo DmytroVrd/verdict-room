@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.common.config import load_settings
+from src.common.config import (
+    DEFAULT_FALLBACK_MODELS,
+    configured_provider_keys,
+    load_settings,
+)
 from src.common.llm import (
     ModelSpec,
     _build_model,
@@ -39,6 +43,23 @@ def test_model_spec_preserves_slashes() -> None:
     assert ModelSpec.parse("featherless:deepseek-ai/DeepSeek-V3.2") == ModelSpec(
         provider="featherless",
         model="deepseek-ai/DeepSeek-V3.2",
+    )
+
+
+def test_only_aiml_and_featherless_providers_are_configured(monkeypatch) -> None:
+    monkeypatch.setenv("AIML_API_KEY", "test")
+    monkeypatch.setenv("FEATHERLESS_API_KEY", "test")
+    monkeypatch.setenv("GROQ_API_KEY", "legacy")
+    monkeypatch.setenv("GEMINI_API_KEY", "legacy")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "legacy")
+
+    assert configured_provider_keys() == {
+        "aiml": True,
+        "featherless": True,
+    }
+    assert DEFAULT_FALLBACK_MODELS == (
+        "aiml:openai/gpt-4.1-mini",
+        "featherless:deepseek-ai/DeepSeek-V3.2",
     )
 
 
