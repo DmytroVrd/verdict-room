@@ -9,7 +9,6 @@ data/cache/
 data/verdicts/
 output/
 
-
-# internal working files (not for the public repo)
+# local notes
 TODO_CODEX.md
 ASK_CODEX.md
