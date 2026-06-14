@@ -1,93 +1,95 @@
 # Verdict Room
 
-Verdict Room is a Band-native multi-agent courtroom for product and vendor
-due diligence. A user submits a purchase case in a Band room; specialized
-agents gather evidence, compare alternatives, debate risks, recruit a
-compliance specialist when needed, and publish a scored verdict.
+**Verdict Room turns weeks of vendor due diligence into a 3-minute multi-agent debate - and gives you a defensible verdict, not just an opinion.**
 
-The live prototype has completed a full six-agent Band-room run, including
-dynamic Compliance recruitment, timeout recovery, and a persisted scorecard.
-After hardening delivery, two consecutive verification runs completed end to
-end in about three minutes each with no reminders, no missing agents, and no
-runtime errors.
+[View the live demo](https://dmytrovrd.github.io/verdict-room/)
 
-![Verdict Room report](docs/e2e-report.png)
+## Problem -> Solution
 
-## Why Band
+Choosing a B2B vendor can take 20-40 hours across pricing, security, GDPR, migration risk, and alternatives. The result is often one person's biased summary with no adversarial review. Verdict Room puts six specialized AI agents into a shared Band room to research, challenge, defend, and score the decision. You get a transparent `BUY`, `BUY_WITH_CONDITIONS`, or `AVOID` verdict in minutes.
 
-Band is the coordination layer, not a notification wrapper. Every handoff,
-shared fact, debate round, participant change, and verdict happens in the
-room. Agents only receive messages that mention them, so the protocol uses
-explicit `@Researcher`, `@Scout`, `@Critic`, `@Advocate`, `@Compliance`, and
-`@Arbiter` handoffs.
+## Architecture
 
-## Agents
+```text
+                               BAND ROOM
+                      Shared context + message bus
 
-| Agent | Job | Default provider |
+  Human case ---------------------------------------------------------+
+       |                                                             |
+       v                                                             v
+  +-----------+     +------------+     +-------+     +----------+     |
+  |  Arbiter  |<--->| Researcher |<--->| Scout |<--->| Advocate |     |
+  +-----------+     +------------+     +-------+     +----------+     |
+       ^                                                             |
+       |              +----------+     +------------+                |
+       +------------->|  Critic  |<--->| Compliance |<---------------+
+                      +----------+     +------------+
+
+                 Band carries every handoff, fact,
+                 debate turn, recruitment, and verdict.
+```
+
+## Six Agents, Two Partner Platforms
+
+Verdict Room runs on **<u>AI/ML API</u>** and **<u>Featherless</u>**, partner technologies provided for the Band of Agents Hackathon.
+
+| Agent | Role | Provider / Model |
 | --- | --- | --- |
-| Arbiter | Deterministic debate state machine and verdict | AI/ML API |
-| Researcher | Sourced pricing, features, and complaints | AI/ML API |
-| Scout | Alternatives and trade-offs | AI/ML API |
-| Critic | Risks, hidden costs, privacy trigger | Featherless |
-| Advocate | Evidence-based defense and closing | Featherless |
-| Compliance | Dynamically recruited specialist | Featherless |
+| Arbiter | Orchestrates the courtroom and issues the scored verdict | **AI/ML API** / `openai/gpt-4.1-mini` |
+| Researcher | Collects sourced pricing, features, and risks | **AI/ML API** / `openai/gpt-4.1-mini` |
+| Scout | Finds alternatives and compares trade-offs | **AI/ML API** / `openai/gpt-4.1-mini` |
+| Advocate | Builds the evidence-based case for adoption | **Featherless** / `deepseek-ai/DeepSeek-V3.2` |
+| Critic | Attacks assumptions, hidden costs, and weak evidence | **Featherless** / `deepseek-ai/DeepSeek-V3.1-Terminus` |
+| Compliance | Joins dynamically when privacy or regulatory risk appears | **Featherless** / `deepseek-ai/DeepSeek-V3.2` |
 
-AI/ML API handles the tool-heavy roles. Featherless Premium handles the
-debate roles through a deterministic adapter that posts model output to Band,
-so those models do not need native function calling. Optional Groq, Gemini,
-and OpenRouter keys extend the fallback chain.
+## How It Works
+
+```text
+Case submitted
+      |
+      v
+Researcher + Scout gather evidence and alternatives
+      |
+      v
+Advocate vs Critic: two adversarial debate rounds
+      |
+      v
+Arbiter dynamically recruits Compliance when risk is detected
+      |
+      v
+Scored verdict + conditions + dissent
+```
+
+The originality is explicit: **dynamic agent recruitment** brings Compliance into a live case only when needed, while the **cross-model courtroom** uses AI/ML API and Featherless to create a real multi-perspective panel instead of one model debating itself.
 
 ## Quickstart
 
-Requirements: Python 3.11+, `uv`, Band Pro, AI/ML API and Featherless keys,
-and six remote agents created in Band.
+Requirements: Python 3.11+, `uv`, a Band account with six agents, and AI/ML API plus Featherless keys.
 
 ```powershell
+uv sync
 Copy-Item .env.example .env
 Copy-Item agent_config.yaml.example agent_config.yaml
-uv sync
-uv run python scripts/smoke_llm.py
-uv run python scripts/smoke_band.py
+```
+
+Add `AIML_API_KEY` and `FEATHERLESS_API_KEY` to `.env`, then add each Band agent's UUID and one-time API key to `agent_config.yaml`.
+
+```powershell
 uv run python -m src.run_all
 ```
 
-In Band, create a room, add Arbiter, Researcher, Scout, Critic, and Advocate,
-then send:
+Create a Band room, add Arbiter, Researcher, Scout, Critic, and Advocate, then mention `@Arbiter` with a vendor decision. Compliance is recruited into the room dynamically when required.
 
-```text
-@Arbiter Analyze whether a 50-person company should buy Notion as its main
-workspace. Compare Confluence and Slite. Prioritize total cost, migration,
-security, and GDPR.
-```
+## Demo
 
-Compliance should not be in the initial room. The Arbiter adds it when the
-Critic emits `COMPLIANCE CONCERN`.
+**Live report:** [dmytrovrd.github.io/verdict-room](https://dmytrovrd.github.io/verdict-room/)
 
-## Configuration
+**Demo video:** Coming soon.
 
-- `.env`: Band URLs, provider keys, model IDs, timeout settings.
-- `agent_config.yaml`: Band UUID and one-time API key for each remote agent.
-- Both secret files are gitignored. Never commit them.
+## Hackathon
 
-The installed Band SDK 1.0 uses `from band import Agent`, Python 3.11+, and
-`await agent.run()`. Some older documentation still shows the pre-1.0
-`thenvoi` import.
-
-## Development
-
-```powershell
-uv run ruff format .
-uv run ruff check .
-uv run pytest -q
-uv run python -m src.tools.web_research "Notion pricing"
-```
-
-Verdicts are stored under `data/verdicts/`. Generate the static demo report:
-
-```powershell
-uv run python scripts/make_report.py data/verdicts/<room-id>.json
-```
+Built for the **Band of Agents Hackathon**.
 
 ## License
 
-MIT
+[MIT](LICENSE)
