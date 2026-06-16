@@ -15,7 +15,7 @@ DEFAULT_MODELS = {
     "scout": "aiml:openai/gpt-4.1-mini",
     "advocate": "featherless:deepseek-ai/DeepSeek-V3.2",
     "critic": "featherless:deepseek-ai/DeepSeek-V3.1-Terminus",
-    "compliance": "featherless:deepseek-ai/DeepSeek-V3.2",
+    "compliance": "aiml:openai/gpt-4.1-mini",
 }
 DEFAULT_FALLBACK_MODELS = (
     "aiml:openai/gpt-4.1-mini",

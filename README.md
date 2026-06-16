@@ -38,9 +38,9 @@ Verdict Room runs on **<u>AI/ML API</u>** and **<u>Featherless</u>**, partner te
 | Arbiter | Orchestrates the courtroom and issues the scored verdict | **AI/ML API** / `openai/gpt-4.1-mini` |
 | Researcher | Collects sourced pricing, features, and risks | **AI/ML API** / `openai/gpt-4.1-mini` |
 | Scout | Finds alternatives and compares trade-offs | **AI/ML API** / `openai/gpt-4.1-mini` |
-| Advocate | Builds the evidence-based case for adoption | **Featherless** / `deepseek-ai/DeepSeek-V3.2` |
-| Critic | Attacks assumptions, hidden costs, and weak evidence | **Featherless** / `deepseek-ai/DeepSeek-V3.1-Terminus` |
-| Compliance | Joins dynamically when privacy or regulatory risk appears | **Featherless** / `deepseek-ai/DeepSeek-V3.2` |
+| Advocate | Builds the evidence-based case for adoption | **AI/ML API primary** / `openai/gpt-4.1-mini`; **Featherless fallback** / `deepseek-ai/DeepSeek-V3.2` |
+| Critic | Attacks assumptions, hidden costs, and weak evidence | **AI/ML API primary** / `openai/gpt-4.1-mini`; **Featherless fallback** / `deepseek-ai/DeepSeek-V3.2` |
+| Compliance | Joins dynamically when privacy or regulatory risk appears | **AI/ML API** / `openai/gpt-4.1-mini` |
 
 ## How It Works
 

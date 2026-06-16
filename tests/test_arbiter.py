@@ -15,6 +15,9 @@ from src.agents.arbiter import (
     ArbiterAdapter,
     DebatePhase,
     DebateState,
+    GroundedVerdictResponse,
+    VerdictCheck,
+    VerdictEvidence,
 )
 
 
@@ -53,6 +56,14 @@ class FakeTools:
 
     async def get_participants(self) -> list[str]:
         return self.added
+
+
+class FakeVerdictLLM:
+    def __init__(self, response: GroundedVerdictResponse) -> None:
+        self.response = response
+
+    async def ainvoke(self, prompt: str) -> GroundedVerdictResponse:
+        return self.response
 
 
 def message(sender: str, content: str) -> PlatformMessage:
@@ -125,6 +136,95 @@ async def test_full_debate_with_dynamic_compliance() -> None:
     assert all(len(content.split()) <= 200 for content, _ in tools.messages)
     assert any(item["metadata"]["kind"] == "verdict" for item in tools.events)
     assert adapter.states["room-1"].phase == DebatePhase.IDLE
+
+
+@pytest.mark.asyncio
+async def test_round_2_compliance_concern_recruits_before_closing() -> None:
+    adapter = ArbiterAdapter(FakeListChatModel(responses=["unused"]))
+    tools = FakeTools()
+    history = HistoryProvider(raw=[])
+
+    turns = [
+        ("Dmytro", "@Arbiter analyze Notion"),
+        ("Researcher", "Facts with sources. @Arbiter"),
+        ("Scout", "Alternatives compared. @Arbiter"),
+        ("Critic", "No specialist issue yet. @Arbiter"),
+        ("Advocate", "Risks can be mitigated. @Arbiter"),
+        ("Critic", "COMPLIANCE CONCERN: GDPR remains unresolved. @Arbiter"),
+    ]
+    for sender, content in turns:
+        await adapter.on_message(
+            message(sender, content),
+            tools,
+            history,
+            None,
+            None,
+            is_session_bootstrap=False,
+            room_id="room-2",
+        )
+
+    state = adapter.states["room-2"]
+    assert state.phase == DebatePhase.COMPLIANCE
+    assert state.after_compliance_phase == DebatePhase.ROUND_2_ADVOCATE
+    assert tools.added == ["Compliance"]
+    assert any("HANDOFF: @Compliance" in content for content, _ in tools.messages)
+
+    await adapter.on_message(
+        message("Compliance", "Conditional GDPR fit. @Arbiter"),
+        tools,
+        history,
+        None,
+        None,
+        is_session_bootstrap=False,
+        room_id="room-2",
+    )
+
+    state = adapter.states["room-2"]
+    assert state.compliance_reviewed is True
+    assert state.phase == DebatePhase.ROUND_2_ADVOCATE
+    assert "HANDOFF: @Advocate | STATE: ROUND_2" in tools.messages[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_grounded_verdict_uses_clean_rationale_assertive_dissent_and_b2c_checks() -> None:
+    response = GroundedVerdictResponse(
+        value_for_money=20,
+        capability_fit=22,
+        risk_profile=18,
+        alternatives=20,
+        recommendation="BUY_WITH_CONDITIONS",
+        rationale_primary=VerdictEvidence(
+            quote='MacBook Pro 14" M4 Pro: Starting around $1,599.'
+        ),
+        rationale_secondary=VerdictEvidence(
+            quote="Excellent 4K editing performance with efficient thermal management."
+        ),
+        rationale_tertiary=VerdictEvidence(
+            quote="Apple laptops generally retain high resale value."
+        ),
+        condition_primary=VerdictCheck(area="cost"),
+        condition_secondary=VerdictCheck(area="capability"),
+        dissent_area="cost",
+    )
+    adapter = ArbiterAdapter(
+        FakeListChatModel(responses=["unused"]),
+        verdict_llm=FakeVerdictLLM(response),
+    )
+    state = DebateState(
+        case=(
+            'Should a freelance video editor buy a MacBook Pro 14" M4 Pro '
+            "as their main work laptop?"
+        ),
+        compliance_reviewed=True,
+    )
+
+    verdict = await adapter._make_grounded_verdict(state)
+
+    assert verdict["rationale"][0] == 'MacBook Pro 14" M4 Pro: Starting around $1,599.'
+    assert "Evidence: (evidence:" not in "\n".join(verdict["rationale"])
+    assert not verdict["dissent"].endswith("?")
+    assert all("vendor quote" not in item.lower() for item in verdict["conditions"])
+    assert all("pilot" not in item.lower() for item in verdict["conditions"])
 
 
 @pytest.mark.asyncio

@@ -32,6 +32,7 @@ def test_v2_default_model_mapping(tmp_path: Path, monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
     settings = load_settings(env_path)
     assert settings.model_specs["arbiter"] == "aiml:openai/gpt-4.1-mini"
+    assert settings.model_specs["compliance"] == "aiml:openai/gpt-4.1-mini"
     assert settings.model_specs["advocate"] == ("featherless:deepseek-ai/DeepSeek-V3.2")
     assert available_model_specs("critic", settings)[0] == ModelSpec(
         provider="featherless",

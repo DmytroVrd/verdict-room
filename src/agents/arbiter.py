@@ -31,22 +31,31 @@ VerdictRiskArea = Literal[
     "alternatives",
 ]
 
-VERDICT_RISK_QUESTIONS = {
-    "cost": "Could the documented pricing create budget pressure?",
-    "migration": "Might migration affect continuity or data quality?",
-    "security": "Could the documented controls leave a buyer requirement unresolved?",
-    "privacy": "Might the documented privacy terms leave a buyer requirement unresolved?",
-    "capability": "Could the documented capabilities miss an important buyer workflow?",
-    "alternatives": "Might an alternative provide a better documented fit?",
+VERDICT_RISK_STATEMENTS = {
+    "cost": "Documented pricing may create budget pressure versus lower-cost alternatives.",
+    "migration": "Migration may affect continuity or data quality until tested.",
+    "security": "Documented controls may leave a buyer security requirement unresolved.",
+    "privacy": "Documented privacy terms may leave a buyer requirement unresolved.",
+    "capability": "Documented capabilities may miss an important buyer workflow.",
+    "alternatives": "A shortlisted alternative may provide a better documented fit.",
 }
 
-VERDICT_CHECKS = {
-    "cost": "Compare equivalent vendor quotes and contract terms.",
-    "migration": "Run a representative import and export pilot.",
-    "security": "Map documented controls to the buyer security requirements.",
-    "privacy": "Review the privacy agreement, data flows, and subprocessors.",
-    "capability": "Test the critical buyer workflows in a pilot.",
-    "alternatives": "Compare equivalent capabilities and contract terms.",
+BUSINESS_VERDICT_CHECKS = {
+    "cost": "Get final seat, module, implementation, and renewal pricing for the buyer's rollout scope.",
+    "migration": "Run a representative import/export migration test using the buyer's real workspace sample.",
+    "security": "Map documented controls to the buyer's security requirements before rollout.",
+    "privacy": "Review the privacy agreement, data flows, residency, and subprocessors before purchase.",
+    "capability": "Test the buyer's critical workflows with a representative user group before rollout.",
+    "alternatives": "Compare the shortlisted alternatives on the buyer's must-have workflows and contract terms.",
+}
+
+PERSONAL_VERDICT_CHECKS = {
+    "cost": "Confirm final street price, taxes, warranty, and exact configuration before purchase.",
+    "migration": "Check that existing files, apps, peripherals, and project workflow transfer cleanly.",
+    "security": "Confirm account, backup, encryption, repair, and warranty choices before storing sensitive work.",
+    "privacy": "Confirm account, backup, encryption, repair, and warranty choices before storing sensitive work.",
+    "capability": "Test the buyer's critical workload on the exact configuration before purchase where possible.",
+    "alternatives": "Compare shortlisted options on workload fit, portability, warranty, and resale priorities.",
 }
 
 ARBITER_EVIDENCE_CONTRACT = """
@@ -127,7 +136,7 @@ class GroundedVerdictResponse(BaseModel):
     condition_secondary: VerdictCheck
     dissent_area: VerdictRiskArea = Field(
         description=(
-            "Choose the category for the strongest opposing buyer-risk question. "
+            "Choose the category for the strongest opposing buyer-risk assertion. "
             "Do not generate free-form dissent prose."
         )
     )
@@ -162,6 +171,7 @@ class DebateState:
     critic_round_2: str = ""
     pending_message: str = ""
     pending_mentions: list[str] = field(default_factory=list)
+    after_compliance_phase: DebatePhase = DebatePhase.ROUND_1_ADVOCATE
 
 
 class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
@@ -300,7 +310,18 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
             )
         elif state.phase == DebatePhase.ROUND_1_CRITIC:
             state.critic_round_1 = self._snapshot(msg.content)
-            if "COMPLIANCE CONCERN" in msg.content.upper():
+            if await self._maybe_recruit_compliance(
+                tools,
+                state,
+                include=("critic1", "research", "scout"),
+                after_phase=DebatePhase.ROUND_1_ADVOCATE,
+                message=msg.content,
+            ):
+                pass
+            elif (
+                "COMPLIANCE CONCERN" in msg.content.upper()
+                and not state.compliance_requested
+            ):
                 state.compliance_requested = True
                 if await self._recruit_compliance(tools):
                     state.phase = DebatePhase.COMPLIANCE
@@ -323,6 +344,12 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
         elif state.phase == DebatePhase.COMPLIANCE:
             state.compliance_reviewed = True
             state.compliance_evidence = self._snapshot(msg.content)
+            if state.after_compliance_phase == DebatePhase.ROUND_2_ADVOCATE:
+                state.phase = DebatePhase.ROUND_2_ADVOCATE
+                await self._ask_round2_advocate(tools, state)
+                logger.info("%s -> %s", previous, self.states[room_id].phase)
+                self._schedule_timeout(room_id, tools)
+                return
             state.phase = DebatePhase.ROUND_1_ADVOCATE
             await self._ask_advocate(tools, state)
         elif state.phase == DebatePhase.ROUND_1_ADVOCATE:
@@ -340,6 +367,16 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
             )
         elif state.phase == DebatePhase.ROUND_2_CRITIC:
             state.critic_round_2 = self._snapshot(msg.content)
+            if await self._maybe_recruit_compliance(
+                tools,
+                state,
+                include=("critic2", "critic1", "advocate1", "research", "scout"),
+                after_phase=DebatePhase.ROUND_2_ADVOCATE,
+                message=msg.content,
+            ):
+                logger.info("%s -> %s", previous, self.states[room_id].phase)
+                self._schedule_timeout(room_id, tools)
+                return
             state.phase = DebatePhase.ROUND_2_ADVOCATE
             await self._delegate(
                 state,
@@ -370,6 +407,48 @@ class ArbiterAdapter(SimpleAdapter[HistoryProvider]):
             "HANDOFF: @Advocate | STATE: ROUND_1 | REQUEST: point-by-point defense",
             ["@Advocate"],
         )
+
+    async def _ask_round2_advocate(
+        self, tools: AgentToolsProtocol, state: DebateState
+    ) -> None:
+        await self._delegate(
+            state,
+            tools,
+            "ROUND 2: CLOSING\n"
+            f"{self._context_block(state, include=('critic2', 'compliance', 'research', 'scout'))}\n"
+            "@Advocate give a concise closing statement. Address the remaining objections point by point "
+            "and state any purchase conditions. Return control to @Arbiter.\n"
+            "HANDOFF: @Advocate | STATE: ROUND_2 | REQUEST: final defense",
+            ["@Advocate"],
+        )
+
+    async def _maybe_recruit_compliance(
+        self,
+        tools: AgentToolsProtocol,
+        state: DebateState,
+        *,
+        include: tuple[str, ...],
+        after_phase: DebatePhase,
+        message: str,
+    ) -> bool:
+        if "COMPLIANCE CONCERN" not in message.upper() or state.compliance_requested:
+            return False
+        state.compliance_requested = True
+        state.after_compliance_phase = after_phase
+        if not await self._recruit_compliance(tools):
+            return False
+        state.phase = DebatePhase.COMPLIANCE
+        await self._delegate(
+            state,
+            tools,
+            "SPECIALIST REVIEW\n"
+            f"{self._context_block(state, include=include)}\n"
+            "@Compliance assess data residency, GDPR/privacy, certifications, and contractual risk. "
+            "Return control to @Arbiter.\n"
+            "HANDOFF: @Compliance | STATE: RECRUIT | REQUEST: compliance opinion",
+            ["@Compliance"],
+        )
+        return True
 
     async def _recruit_compliance(self, tools: AgentToolsProtocol) -> bool:
         try:
@@ -514,8 +593,9 @@ Transcript:
             "markdown, or use an ellipsis.\n"
             "- Use an absence quote only when it explicitly states the absence "
             "or evidence gap. Omission is not evidence.\n"
-            "- Conditions are checks with no predicted result.\n"
-            "- Dissent is an uncertain buyer-risk question, not a product fact.\n\n"
+            "- Conditions are concrete checks for this buyer and case type.\n"
+            "- Dissent is a concise opposing argument stated as an assertion, "
+            "not a question.\n\n"
             f"AUTHORITATIVE EVIDENCE:\n{authoritative}\n\n"
             f"DEBATE CONTEXT FOR SCORING ONLY:\n{debate}"
         )
@@ -526,13 +606,14 @@ Transcript:
             "alternatives": response.alternatives,
         }
         rationale = [
-            f'Evidence: (evidence: "{item.quote}")'
+            item.quote
             for item in (
                 response.rationale_primary,
                 response.rationale_secondary,
                 response.rationale_tertiary,
             )
         ]
+        checks = self._verdict_checks_for_case(state.case)
         return {
             "case": state.case,
             "scores": scores,
@@ -540,13 +621,29 @@ Transcript:
             "recommendation": response.recommendation,
             "rationale": rationale,
             "conditions": [
-                VERDICT_CHECKS[response.condition_primary.area],
-                VERDICT_CHECKS[response.condition_secondary.area],
+                checks[response.condition_primary.area],
+                checks[response.condition_secondary.area],
             ],
-            "dissent": VERDICT_RISK_QUESTIONS[response.dissent_area],
+            "dissent": VERDICT_RISK_STATEMENTS[response.dissent_area],
             "compliance_reviewed": state.compliance_reviewed,
             "evidence_gaps": list(state.missing_agents),
         }
+
+    @staticmethod
+    def _verdict_checks_for_case(case: str) -> dict[VerdictRiskArea, str]:
+        normalized = case.lower()
+        personal_markers = (
+            "freelance",
+            "laptop",
+            "macbook",
+            "dell xps",
+            "asus",
+            "personal",
+            "consumer",
+        )
+        if any(marker in normalized for marker in personal_markers):
+            return PERSONAL_VERDICT_CHECKS
+        return BUSINESS_VERDICT_CHECKS
 
     @staticmethod
     def _extract_json(text: str) -> str:
@@ -866,7 +963,13 @@ Transcript:
                 "HANDOFF: @Critic | STATE: ROUND_1 | REQUEST: strongest objections",
                 ["@Critic"],
             )
-        elif phase in {DebatePhase.ROUND_1_CRITIC, DebatePhase.COMPLIANCE}:
+        elif phase == DebatePhase.COMPLIANCE:
+            state.phase = state.after_compliance_phase
+            if state.phase == DebatePhase.ROUND_2_ADVOCATE:
+                await self._ask_round2_advocate(tools, state)
+            else:
+                await self._ask_advocate(tools, state)
+        elif phase == DebatePhase.ROUND_1_CRITIC:
             state.phase = DebatePhase.ROUND_1_ADVOCATE
             await self._ask_advocate(tools, state)
         elif phase == DebatePhase.ROUND_1_ADVOCATE:

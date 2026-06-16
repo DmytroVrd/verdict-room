@@ -17,6 +17,7 @@ from src.agents.workers import (
     GroundedEvidence,
     GroundedHypothesis,
     TextWorkerAdapter,
+    _model_role_for_worker,
 )
 
 
@@ -38,6 +39,12 @@ class FakeGroundedLLM:
     async def ainvoke(self, prompt: str) -> GroundedDebateResponse:
         self.prompts.append(prompt)
         return self.response
+
+
+def test_text_workers_use_aiml_primary_chain_for_stability() -> None:
+    assert _model_role_for_worker("compliance") == "arbiter"
+    assert _model_role_for_worker("critic") == "arbiter"
+    assert _model_role_for_worker("advocate") == "arbiter"
 
 
 def message(sender: str, content: str) -> PlatformMessage:

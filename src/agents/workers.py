@@ -167,7 +167,7 @@ def build_worker_agent(
         adapter=TextWorkerAdapter(
             role=role,
             llm=make_llm(
-                "arbiter",
+                _model_role_for_worker(role),
                 settings,
                 temperature_role=role,
             ),
@@ -178,6 +178,10 @@ def build_worker_agent(
         rest_url=settings.band_rest_url,
         ws_url=settings.band_ws_url,
     )
+
+
+def _model_role_for_worker(role: str) -> str:
+    return "arbiter"
 
 
 class TextWorkerAdapter(SimpleAdapter[HistoryProvider]):
