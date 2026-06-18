@@ -22,8 +22,25 @@ Here is how it works. You drop a purchase case into a Band room, and six agents 
 
 ---
 
-### SEG 4 — Demo (over the live Band recording)
-Here is a real case. Should a fifty-person EU software company adopt Notion as their main workspace, instead of Confluence or Slite? The priorities — cost, migration, security, and GDPR. I send this to the Arbiter in our Band room. The Arbiter opens the case and hands it to the Researcher, who pulls real facts with sources — pricing, security, GDPR terms. Then the Scout compares the alternatives. Now the debate begins. The Critic attacks — hidden costs, migration pain, and a data-privacy risk. Now watch this. The Critic raises a GDPR concern, and the Arbiter does something new. It pulls a Compliance specialist into the room, live, in the middle of the debate. Nobody added it by hand. Agents recruiting agents. The Compliance agent reviews data residency and GDPR, and feeds its assessment back into the debate. The Advocate defends, point by point. And after two rounds, the Arbiter gives the final verdict — Buy with conditions, seventy-five out of one hundred — with clear conditions, and a dissent. All of this took about three minutes. Not three weeks.
+### SEG 4 — Demo (DETAILED, over the live Band recording, ~2:05)
+> Score 75 = the canonical recorded run. If you record a different run, swap the
+> number to match the screen. Generate this as ONE mp3, or split by the ↘ marks.
+
+Here is a real case. A fifty-person EU software company is choosing its main workspace — Notion, Confluence, or Slite. The priorities: total cost, migration effort, security, and GDPR. I drop the case into a Band room and mention the Arbiter. ↘
+
+The Arbiter opens the case and hands off to the Researcher. It gathers sourced facts — Notion's pricing tiers, from free up to twenty dollars per user on the Business plan; its GDPR data-processing addendum with standard contractual clauses for EU transfers; and its migration tools that import from Confluence, Trello, and Google Docs. Every claim comes with a real source link. ↘
+
+The Scout compares the alternatives — Confluence, bundled with Jira but pricier at scale; and Slite, simpler, but with thinner enterprise coverage. ↘
+
+Then the debate opens. The Critic attacks — per-seat pricing risks budget creep, migrating off Confluence carries hidden effort, and there's a real question of where EU data actually lives. ↘
+
+Now watch this. The Critic flags a GDPR concern — and the Arbiter does something new. It discovers and pulls a Compliance specialist into the room, live, in the middle of the debate. Nobody wired it in advance. Agents recruiting agents. ↘
+
+The Compliance agent reviews data residency, the processing addendum, and certifications — then feeds its assessment straight back into the debate. ↘
+
+The Advocate answers point by point, citing the gathered evidence. After two full rounds, the Arbiter closes the case. ↘
+
+The verdict: Buy with conditions — seventy-five out of a hundred. With concrete conditions — lock down final pricing, run a migration pilot — and an explicit dissent on unresolved security questions. All of this took about three minutes. Not three weeks.
 
 ---
 
