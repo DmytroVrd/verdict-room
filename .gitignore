@@ -12,3 +12,7 @@ output/
 # local notes
 TODO_CODEX.md
 ASK_CODEX.md
+
+# internal working materials (not for public repo)
+presentation/
+docs/*.md
